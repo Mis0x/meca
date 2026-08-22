@@ -521,9 +521,9 @@
     border: 1.5px solid var(--line);
     background-color: var(--panel);
     color: var(--text);
-    flex: 1;
     width: 100%;
     min-width: 0;
+    flex-shrink: 1;
     border-radius: 3px;
     appearance: none;
     -webkit-appearance: none;
@@ -771,8 +771,16 @@
     color: var(--surface-text);
     min-height: 14px;
   }
-  .card-preview-meta .cp-lift { color: var(--accent-light); }
-  html[data-theme="light"] .card-preview-meta .cp-lift { color: var(--accent-2); font-weight: 600; }
+  .card-preview-meta:not(:empty) {
+    display: block;
+    width: fit-content;
+    margin: 10px auto 0;
+    background: rgba(6, 10, 20, 0.72);
+    border: 1px solid var(--line);
+    padding: 5px 12px;
+    border-radius: 4px;
+  }
+  .card-preview-meta .cp-lift { color: var(--accent-light); font-weight: 600; }
   .card-preview-hint {
     display: none;
     margin-top: 10px;
@@ -918,7 +926,7 @@
   <div class="actions-row">
     <button class="btn" id="startBtn" disabled data-i18n="btn.start">Lancer l'analyse</button>
     <button class="btn secondary" id="restoreSessionBtn" style="display:none;" data-i18n="btn.restoreSession">Récupérer dernière session</button>
-    <button class="btn secondary" id="clearCacheBtn" data-i18n="btn.clearCache">Vider le cache local</button>
+    <button class="btn secondary" id="clearCacheBtn" style="display:none;" data-i18n="btn.clearCache">Vider le cache local</button>
     <span class="error-note" id="setupError"></span>
   </div>
 
@@ -1293,6 +1301,16 @@
     });
   }
 
+  function idbCount(store) {
+    return new Promise((resolve) => {
+      if (!db) return resolve(0);
+      const tx = db.transaction(store, "readonly");
+      const req = tx.objectStore(store).count();
+      req.onsuccess = () => resolve(req.result || 0);
+      req.onerror = () => resolve(0);
+    });
+  }
+
   function idbClearAll() {
     return new Promise((resolve) => {
       if (!db) return resolve(false);
@@ -1411,10 +1429,24 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // Toute requête réseau passe par ici : évite qu'une requête bloquée
+  // (Scryfall lent, Wi-Fi capricieux…) ne fasse tourner un spinner à
+  // l'infini ou ne bloque un worker de l'analyse en masse.
+  const FETCH_TIMEOUT_MS = 9000;
+  async function fetchWithTimeout(url, ms) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms || FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function resolveEdhrecSlugViaScryfall(name) {
     try {
       const url = "https://api.scryfall.com/cards/named?fuzzy=" + encodeURIComponent(name);
-      const res = await fetch(url);
+      const res = await fetchWithTimeout(url);
       if (!res.ok) return null;
       const json = await res.json();
       const edhrecUrl = json.related_uris && json.related_uris.edhrec;
@@ -1430,7 +1462,7 @@
     const url = EDHREC_BASE + "/pages/cards/" + encodeURIComponent(slug) + ".json";
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url);
         if (res.status === 404) return { data: null, notFound: true };
         if (!res.ok) throw new Error("HTTP " + res.status);
         const json = await res.json();
@@ -1446,12 +1478,14 @@
   }
 
   // Tente la page carte EDHREC via le slug local (en essayant chaque face
-  // pour les cartes double-face) ; si tout échoue, retombe sur l'API
-  // Scryfall (fuzzy match par nom) pour récupérer le slug EDHREC exact via
-  // related_uris.edhrec, puis réessaie avec ce slug. Corrige les cas où la
-  // normalisation locale du nom diverge de celle d'EDHREC (ponctuation,
-  // casse, ou carte indexée sous son autre face).
-  async function fetchCardPage(slug, cardName) {
+  // pour les cartes double-face, une opération purement locale donc peu
+  // coûteuse). Le repli réseau via Scryfall (related_uris.edhrec) n'est
+  // déclenché que lorsque useScryfallFallback est explicitement demandé
+  // (bouton "réessayer" individuel) : l'activer pour chaque carte non
+  // trouvée pendant l'analyse en masse (jetons, émblèmes, produits scellés
+  // qui ne seront de toute façon jamais indexés) multiplierait les
+  // requêtes réseau et ralentirait l'analyse de collections volumineuses.
+  async function fetchCardPage(slug, cardName, useScryfallFallback) {
     const cached = await idbGet(STORE_CARDS, slug);
     if (cached && Date.now() - cached.fetchedAt < CACHE_MAX_AGE_MS) {
       return { data: cached.data, fromCache: true, notFound: cached.notFound || false };
@@ -1461,17 +1495,18 @@
     const candidates = cardName ? candidateSlugs(cardName) : [slug];
     if (!candidates.includes(slug)) candidates.unshift(slug);
 
+    let lastResult = { data: null, notFound: true };
     for (const candidate of candidates) {
       if (tried.has(candidate)) continue;
       tried.add(candidate);
-      const direct = await fetchCardPageRaw(candidate);
-      if (direct.data) {
-        await idbSet(STORE_CARDS, { slug, data: direct.data, notFound: false, fetchedAt: Date.now() });
-        return { data: direct.data, fromCache: false, notFound: false };
+      lastResult = await fetchCardPageRaw(candidate);
+      if (lastResult.data) {
+        await idbSet(STORE_CARDS, { slug, data: lastResult.data, notFound: false, fetchedAt: Date.now() });
+        return { data: lastResult.data, fromCache: false, notFound: false };
       }
     }
 
-    if (cardName) {
+    if (useScryfallFallback && cardName) {
       const altSlug = await resolveEdhrecSlugViaScryfall(cardName);
       if (altSlug && !tried.has(altSlug)) {
         const alt = await fetchCardPageRaw(altSlug);
@@ -1483,7 +1518,7 @@
     }
 
     await idbSet(STORE_CARDS, { slug, data: null, notFound: true, fetchedAt: Date.now() });
-    return { data: null, fromCache: false, notFound: direct.notFound, error: direct.error };
+    return { data: null, fromCache: false, notFound: true, error: lastResult.error };
   }
 
   async function fetchCommanderPage(slug) {
@@ -1493,7 +1528,7 @@
     }
     const url = EDHREC_BASE + "/pages/commanders/" + encodeURIComponent(slug) + ".json";
     try {
-      const res = await fetch(url);
+      const res = await fetchWithTimeout(url);
       if (!res.ok) return null;
       const json = await res.json();
       await idbSet(STORE_COMMANDERS, { slug, data: json, fetchedAt: Date.now() });
@@ -1511,7 +1546,13 @@
     async function next() {
       while (idx < items.length) {
         const my = idx++;
-        results[my] = await worker(items[my], my);
+        try {
+          results[my] = await worker(items[my], my);
+        } catch (err) {
+          // Une carte en échec (réseau, erreur inattendue…) ne doit jamais
+          // interrompre le reste de l'analyse.
+          results[my] = { error: String(err) };
+        }
         done++;
         if (onProgress) onProgress(done, items.length, items[my]);
       }
@@ -1825,7 +1866,7 @@
     status.textContent = "";
 
     await idbDelete(STORE_CARDS, slug);
-    const { data, notFound } = await fetchCardPage(slug, name);
+    const { data, notFound } = await fetchCardPage(slug, name, true);
 
     btn.classList.remove("spinning");
     btn.blur();
@@ -2000,6 +2041,7 @@
 
     visibleCommanderCount = COMMANDER_PAGE_SIZE;
     renderResults();
+    updateClearCacheVisibility();
     els.resultsTitle.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
@@ -2051,6 +2093,11 @@
     });
   }
 
+  async function updateClearCacheVisibility() {
+    const [a, b] = await Promise.all([idbCount(STORE_CARDS), idbCount(STORE_COMMANDERS)]);
+    els.clearCacheBtn.style.display = a + b > 0 ? "inline-block" : "none";
+  }
+
   async function checkForSavedSession() {
     const saved = await idbGet(STORE_SESSION, "lastCollection");
     if (saved && saved.items && saved.items.length > 0) {
@@ -2058,6 +2105,7 @@
       lastSessionInfo = { fileName: saved.fileName, count: saved.items.length };
       updateRestoreBtnLabel();
     }
+    updateClearCacheVisibility();
   }
 
   els.restoreSessionBtn.addEventListener("click", async () => {
@@ -2087,6 +2135,7 @@
   els.clearCacheBtn.addEventListener("click", async () => {
     await idbClearAll();
     els.restoreSessionBtn.style.display = "none";
+    els.clearCacheBtn.style.display = "none";
     logLine(t("log.cacheCleared"));
   });
 
