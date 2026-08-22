@@ -63,9 +63,11 @@
   }
 
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
+  html { scroll-behavior: smooth; overflow-x: hidden; }
   body {
     transition: background-color 0.2s ease, color 0.2s ease;
+    overflow-x: hidden;
+    max-width: 100vw;
   }
 
   body {
@@ -517,6 +519,9 @@
   select {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 12.5px;
+    height: 38px;
+    line-height: 22px;
+    box-sizing: border-box;
     padding: 7px 30px 7px 10px;
     border: 1.5px solid var(--line);
     background-color: var(--panel);
@@ -556,7 +561,10 @@
     grid-template-columns: 1fr auto;
     gap: 16px;
     align-items: start;
+    max-width: 100%;
+    overflow: hidden;
   }
+  .cc-body { min-width: 0; }
   .commander-card::before {
     content: "";
     position: absolute;
@@ -576,7 +584,7 @@
   }
   .commander-card.owned .tab { background: var(--owned); box-shadow: 0 0 10px var(--owned); }
 
-  .cc-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .cc-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
   .cc-rank {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 12px;
@@ -592,8 +600,10 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
+    max-width: 100%;
+    flex-wrap: wrap;
   }
-  .cc-name a { text-decoration: none; border-bottom: 1px dotted var(--accent); }
+  .cc-name a { text-decoration: none; border-bottom: 1px dotted var(--accent); overflow-wrap: break-word; word-break: break-word; }
   .cc-name a:hover { border-bottom-style: solid; }
   .cc-pips { display: inline-flex; gap: 3px; }
   .pip { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(234,246,255,0.35); box-shadow: 0 0 4px rgba(53,214,255,0.25); }
@@ -614,8 +624,8 @@
   }
   .copy-btn:hover { color: var(--accent-light); border-color: var(--accent); box-shadow: 0 0 8px -2px var(--accent); }
   .copy-btn.copied { color: var(--owned); border-color: var(--owned); box-shadow: 0 0 8px -2px var(--owned); }
-  .cc-cards-list .row-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-  .cc-cards-list .row-name a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cc-cards-list .row-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+  .cc-cards-list .row-name a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
 
   .cc-owned-flag {
     font-family: 'IBM Plex Mono', monospace;
@@ -658,10 +668,13 @@
   .cc-cards-list .row {
     display: flex;
     justify-content: space-between;
+    align-items: center;
+    gap: 8px;
     padding: 3px 0;
     border-bottom: 1px solid var(--line);
+    min-width: 0;
   }
-  .cc-cards-list .row .lift { color: var(--accent); font-weight: 600; }
+  .cc-cards-list .row .lift { color: var(--accent); font-weight: 600; flex-shrink: 0; }
   .cc-cards-list .row a { color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--text-dim); }
   .cc-cards-list .row a:hover { border-bottom-style: solid; color: var(--accent-light); }
   .cc-cards-rest { display: none; }
@@ -988,7 +1001,7 @@
 <div class="card-preview" id="cardPreview">
   <div class="card-preview-frame" id="cardPreviewFrame">
     <div class="card-preview-spinner"></div>
-    <img id="cardPreviewImg" src="" alt="" />
+    <img id="cardPreviewImg" src="" alt="" loading="lazy" decoding="async" />
     <button class="cp-arrow cp-arrow-left" id="cpPrevBtn" type="button" data-i18n-aria="preview.prev" aria-label="Carte précédente">‹</button>
     <button class="cp-arrow cp-arrow-right" id="cpNextBtn" type="button" data-i18n-aria="preview.next" aria-label="Carte suivante">›</button>
   </div>
@@ -1004,10 +1017,11 @@
   // Config & état
   // ---------------------------------------------------------------------
   const DB_NAME = "moxfield_edhrec_cache";
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
   const STORE_CARDS = "cards";
   const STORE_COMMANDERS = "commanders";
   const STORE_SESSION = "session";
+  const STORE_IMAGES = "images";
   const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
   const FETCH_CONCURRENCY = 12; // requêtes cartes en parallèle pendant l'analyse principale
   const REFINE_CONCURRENCY = 6; // requêtes commandants en parallèle pour le top N
@@ -1265,6 +1279,9 @@
         if (!_db.objectStoreNames.contains(STORE_SESSION)) {
           _db.createObjectStore(STORE_SESSION, { keyPath: "key" });
         }
+        if (!_db.objectStoreNames.contains(STORE_IMAGES)) {
+          _db.createObjectStore(STORE_IMAGES, { keyPath: "name" });
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -1314,10 +1331,11 @@
   function idbClearAll() {
     return new Promise((resolve) => {
       if (!db) return resolve(false);
-      const tx = db.transaction([STORE_CARDS, STORE_COMMANDERS, STORE_SESSION], "readwrite");
+      const tx = db.transaction([STORE_CARDS, STORE_COMMANDERS, STORE_SESSION, STORE_IMAGES], "readwrite");
       tx.objectStore(STORE_CARDS).clear();
       tx.objectStore(STORE_COMMANDERS).clear();
       tx.objectStore(STORE_SESSION).clear();
+      tx.objectStore(STORE_IMAGES).clear();
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
     });
@@ -1768,7 +1786,7 @@
 
       card.innerHTML = `
         <div class="tab"></div>
-        <div>
+        <div class="cc-body">
           <div class="cc-head">
             <span class="cc-rank">N°${i + 1}</span>
             <h3 class="cc-name"><a class="card-hover-link" href="${c.url}" target="_blank" rel="noopener" data-card="${escapeHtml(c.name)}">${escapeHtml(c.name)}</a><button type="button" class="copy-btn" data-copy-text="${escapeHtml(c.name)}" title="${t("copy.btn")}" aria-label="${t("copy.btn")}">${COPY_ICON}</button></h3>
@@ -2134,6 +2152,7 @@
   els.ownedFilter.addEventListener("change", () => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); });
   els.clearCacheBtn.addEventListener("click", async () => {
     await idbClearAll();
+    imageUrlMemCache.clear();
     els.restoreSessionBtn.style.display = "none";
     els.clearCacheBtn.style.display = "none";
     logLine(t("log.cacheCleared"));
@@ -2159,9 +2178,40 @@
   let navIndex = -1;
 
   let previewToken = 0;
+  const imageUrlMemCache = new Map(); // nom de carte -> URL CDN Scryfall résolue (cache mémoire, session)
+  const IMAGE_URL_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
 
-  function scryfallImageUrl(name) {
-    return "https://api.scryfall.com/cards/named?fuzzy=" + encodeURIComponent(name) + "&format=image&version=large";
+  // Résout le nom d'une carte vers son URL d'image directe sur le CDN
+  // Scryfall (cards.scryfall.io), au lieu de réinterroger à chaque survol
+  // le point d'entrée /cards/named?...&format=image (recherche floue +
+  // redirection, soumis aux limites de débit de l'API Scryfall). Le
+  // résultat est mis en cache en mémoire puis dans IndexedDB : au bout
+  // d'un moment de défilement, la grande majorité des cartes déjà vues
+  // se résolvent instantanément sans requête réseau, ce qui évite le
+  // "cadre blanc" observé après une longue session de survol.
+  async function resolveScryfallImageUrl(name) {
+    if (imageUrlMemCache.has(name)) return imageUrlMemCache.get(name);
+
+    const cached = await idbGet(STORE_IMAGES, name);
+    if (cached && cached.url && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
+      imageUrlMemCache.set(name, cached.url);
+      return cached.url;
+    }
+
+    try {
+      const apiUrl = "https://api.scryfall.com/cards/named?fuzzy=" + encodeURIComponent(name);
+      const res = await fetchWithTimeout(apiUrl);
+      if (!res.ok) return null;
+      const json = await res.json();
+      const faceImages = json.image_uris || (json.card_faces && json.card_faces[0] && json.card_faces[0].image_uris);
+      const imgUrl = faceImages && (faceImages.large || faceImages.normal || faceImages.png);
+      if (!imgUrl) return null;
+      imageUrlMemCache.set(name, imgUrl);
+      idbSet(STORE_IMAGES, { name, url: imgUrl, fetchedAt: Date.now() });
+      return imgUrl;
+    } catch (err) {
+      return null;
+    }
   }
 
   cardPreviewImg.addEventListener("load", () => {
@@ -2171,14 +2221,16 @@
   cardPreviewImg.addEventListener("error", () => {
     const token = previewToken;
     const failedSrc = cardPreviewImg.src;
-    if (!cardPreviewImg.dataset.retried) {
-      // Un survol rapide peut saturer les requêtes vers l'API Scryfall ;
-      // on retente une fois après un court délai avant d'abandonner.
-      cardPreviewImg.dataset.retried = "1";
+    const attempt = parseInt(cardPreviewImg.dataset.retryCount || "0", 10);
+    if (attempt < 2 && failedSrc) {
+      // Une image CDN peut occasionnellement échouer sans que le lien soit
+      // mauvais (Wi-Fi capricieux, hoquet ponctuel) : on retente avec un
+      // backoff progressif avant d'abandonner.
+      cardPreviewImg.dataset.retryCount = String(attempt + 1);
       setTimeout(() => {
         if (token !== previewToken) return; // une autre carte a été survolée entre-temps
         cardPreviewImg.src = failedSrc;
-      }, 350);
+      }, 400 * (attempt + 1));
       return;
     }
     cardPreviewFrame.classList.add("loaded"); // arrête le spinner même en cas d'échec définitif
@@ -2186,12 +2238,22 @@
 
   function renderPreviewFor(name, url) {
     previewToken++;
-    cardPreviewImg.dataset.retried = "";
+    const token = previewToken;
+    cardPreviewImg.dataset.retryCount = "0";
     cardPreviewImg.classList.remove("loaded");
     cardPreviewFrame.classList.remove("loaded");
-    cardPreviewImg.src = scryfallImageUrl(name);
+    cardPreviewImg.removeAttribute("src");
     cardPreviewImg.alt = name;
     currentPreviewUrl = url;
+
+    resolveScryfallImageUrl(name).then((imgUrl) => {
+      if (token !== previewToken) return; // une autre carte a été survolée entre-temps
+      if (!imgUrl) {
+        cardPreviewFrame.classList.add("loaded"); // pas d'image trouvée, on arrête le spinner
+        return;
+      }
+      cardPreviewImg.src = imgUrl;
+    });
   }
 
   function updatePreviewNavUI() {
