@@ -382,6 +382,12 @@
     margin-bottom: 5px;
   }
   .settings-field { flex: 1; min-width: 260px; }
+  .field-hint {
+    margin: 7px 0 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
   input[type="text"], input[type="url"], input[type="number"] {
     width: 100%;
     font-family: 'IBM Plex Mono', monospace;
@@ -401,16 +407,18 @@
     font-size: 13px;
     letter-spacing: 0.03em;
     text-transform: uppercase;
-    background: var(--surface);
-    color: var(--surface-text);
+    background: var(--accent);
+    color: var(--surface-dark);
+    font-weight: 600;
     border: none;
     padding: 12px 20px;
     cursor: pointer;
-    transition: background 0.12s ease, transform 0.06s ease;
+    box-shadow: 0 0 14px -4px var(--accent);
+    transition: background 0.12s ease, transform 0.06s ease, box-shadow 0.12s ease;
   }
-  .btn:hover:not(:disabled) { background: var(--surface-dark); box-shadow: 0 0 16px -2px var(--accent); }
+  .btn:hover:not(:disabled) { background: var(--accent-light); box-shadow: 0 0 20px -2px var(--accent); }
   .btn:active:not(:disabled) { transform: translateY(1px); }
-  .btn:disabled { background: var(--text-dim); opacity: 0.5; cursor: not-allowed; }
+  .btn:disabled { background: var(--text-dim); color: var(--surface-text); box-shadow: none; opacity: 0.5; cursor: not-allowed; }
   .btn.secondary {
     background: transparent;
     color: var(--accent-light);
@@ -610,9 +618,9 @@
     border: 1.5px solid;
     box-sizing: border-box;
   }
-  .pip-W { background: #fdf6e3; border-color: #d9b84a; box-shadow: 0 0 6px rgba(217, 184, 74, 0.65); }
+  .pip-W { background: #d9b84a; border-color: #d9b84a; box-shadow: 0 0 6px rgba(217, 184, 74, 0.65); }
   .pip-U { background: #3fd0ff; border-color: #0f9fd9; box-shadow: 0 0 6px rgba(63, 208, 255, 0.65); }
-  .pip-B { background: #241b33; border-color: #b565ff; box-shadow: 0 0 6px rgba(181, 101, 255, 0.65); }
+  .pip-B { background: #b565ff; border-color: #b565ff; box-shadow: 0 0 6px rgba(181, 101, 255, 0.65); }
   .pip-R { background: #ff5f57; border-color: #d8362c; box-shadow: 0 0 6px rgba(255, 95, 87, 0.6); }
   .pip-G { background: #39e58a; border-color: #1fb86a; box-shadow: 0 0 6px rgba(57, 229, 138, 0.6); }
   .pip-c {
@@ -919,12 +927,12 @@
         <li data-i18n="help.exportStep1">Va sur <code>moxfield.com</code> et ouvre ta <strong>Collection</strong>.</li>
         <li data-i18n="help.exportStep2">Clique sur le bouton <strong>Export</strong>.</li>
         <li data-i18n="help.exportStep3">Choisis le format <strong>CSV</strong> et télécharge le fichier.</li>
-        <li data-i18n="help.exportStep4">Dépose ce fichier tel quel ci-dessous — l'app détecte automatiquement les colonnes utiles, quel que soit leur ordre.</li>
+        <li data-i18n="help.exportStep4">Dépose ce fichier tel quel ci-dessous.</li>
       </ol>
 
       <h4 data-i18n="help.doTitle">Ce que fait l'outil</h4>
-      <p data-i18n="help.doP1">Pour chaque carte unique de ta collection, l'app va chercher sur EDHREC la liste des commandants qui la jouent le plus souvent, et compare ce taux au taux de jeu <em>moyen</em> de la carte tous commandants confondus. Ça donne un score de <strong>synergie (lift)</strong> : une carte jouée bien plus souvent avec un commandant précis qu'ailleurs obtient un score élevé, alors qu'un staple joué partout (Sol Ring, Command Tower…) obtient un score proche de zéro, peu importe le commandant.</p>
-      <p data-i18n="help.doP2">Ces scores sont additionnés par commandant, ce qui permet de classer les commandants selon la quantité de cartes de ta collection qui leur sont statistiquement liées.</p>
+      <p data-i18n="help.doP1">Pour chaque carte unique de ta collection, l'app va chercher sur EDHREC la liste des commandants qui la jouent le plus souvent, et compare ce taux au taux de jeu <em>moyen</em> de la carte tous commandants confondus. Ça donne un score de <strong>synergie (lift)</strong> : un multiplicateur, pas un pourcentage. Par exemple, une carte affichée « ×1000 » est jouée environ 1000 fois plus souvent avec ce commandant précis que sa moyenne sur EDHREC — signe d'une carte de niche presque exclusivement associée à lui. À l'inverse, un staple joué partout (Sol Ring, Command Tower…) obtient un score proche de zéro, peu importe le commandant, car son taux de jeu ne varie presque pas d'un commandant à l'autre.</p>
+      <p data-i18n="help.doP2">Ces multiplicateurs sont additionnés par commandant : le score total qui apparaît sur chaque fiche n'est donc ni un pourcentage ni une note sur 100, mais simplement la somme de tous ces « ×N » sur les cartes de ta collection liées à ce commandant. Il ne se compare qu'entre commandants de ta propre analyse : plus il est élevé, plus tu as de cartes de niche qui pointent statistiquement vers lui.</p>
 
       <h4 data-i18n="help.notTitle">Ce que le résultat ne dit pas</h4>
       <p data-i18n="help.notP1">L'app ne propose pas de decklist complète ni un % de complétion par rapport à une liste type — volontairement, pour ne pas te limiter aux cartes déjà populaires et te faire passer à côté de pépites plus confidentielles de ta collection. Le score de synergie indique où ta collection est déjà utile, pas une garantie que ces cartes forment ensemble un deck cohérent et jouable tel quel.</p>
@@ -944,9 +952,10 @@
   </div>
 
   <div class="settings-row">
-    <div class="settings-field" style="max-width: 220px; min-width: 160px;">
-      <label for="minSample" data-i18n="settings.minSample">Échantillon minimum (decks EDHREC)</label>
+    <div class="settings-field" style="max-width: 340px;">
+      <label for="minSample" data-i18n="settings.minSample">Échantillon minimum de decks (EDHREC)</label>
       <input type="number" id="minSample" value="120" min="0" />
+      <p class="field-hint" data-i18n="settings.minSampleHint">Ignore les commandants trop peu joués sur EDHREC pour donner un score fiable — en dessous de ce nombre de decks recensés, la statistique est trop bruitée. Descends la valeur pour inclure des commandants plus confidentiels, ou monte-la pour ne garder que les plus établis.</p>
     </div>
   </div>
 
@@ -984,7 +993,7 @@
   </details>
 
   <h2 class="section-title" id="resultsTitle" style="display:none;" data-i18n="results.title">Fiches commandants</h2>
-  <p class="section-note" id="resultsNote" style="display:none;" data-i18n="results.note">Classées par score de synergie : la somme, pour chaque commandant, du <em>lift</em> de tes cartes qui lui sont statistiquement associées (bien au-delà de leur taux de jeu moyen). Un score élevé = beaucoup de tes cartes de niche collent précisément à ce commandant — pas une comparaison avec une decklist type.</p>
+  <p class="section-note" id="resultsNote" style="display:none;" data-i18n="results.note">Classées par score de synergie : la somme, pour chaque commandant, du <em>lift</em> de tes cartes qui lui sont statistiquement associées — un multiplicateur (« ×N » = jouée N fois plus souvent avec ce commandant que sa moyenne), pas un pourcentage. Un score élevé = beaucoup de tes cartes de niche collent précisément à ce commandant — pas une comparaison avec une decklist type.</p>
 
   <div class="filter-bar" id="filterBar">
     <div class="filter-group">
@@ -1056,17 +1065,18 @@
       "help.exportStep1": 'Va sur <code>moxfield.com</code> et ouvre ta <strong>Collection</strong>.',
       "help.exportStep2": 'Clique sur le bouton <strong>Export</strong>.',
       "help.exportStep3": 'Choisis le format <strong>CSV</strong> et télécharge le fichier.',
-      "help.exportStep4": "Dépose ce fichier tel quel ci-dessous — l'app détecte automatiquement les colonnes utiles, quel que soit leur ordre.",
+      "help.exportStep4": "Dépose ce fichier tel quel ci-dessous.",
       "help.doTitle": "Ce que fait l'outil",
-      "help.doP1": "Pour chaque carte unique de ta collection, l'app va chercher sur EDHREC la liste des commandants qui la jouent le plus souvent, et compare ce taux au taux de jeu <em>moyen</em> de la carte tous commandants confondus. Ça donne un score de <strong>synergie (lift)</strong> : une carte jouée bien plus souvent avec un commandant précis qu'ailleurs obtient un score élevé, alors qu'un staple joué partout (Sol Ring, Command Tower…) obtient un score proche de zéro, peu importe le commandant.",
-      "help.doP2": "Ces scores sont additionnés par commandant, ce qui permet de classer les commandants selon la quantité de cartes de ta collection qui leur sont statistiquement liées.",
+      "help.doP1": "Pour chaque carte unique de ta collection, l'app va chercher sur EDHREC la liste des commandants qui la jouent le plus souvent, et compare ce taux au taux de jeu <em>moyen</em> de la carte tous commandants confondus. Ça donne un score de <strong>synergie (lift)</strong> : un multiplicateur, pas un pourcentage. Par exemple, une carte affichée « ×1000 » est jouée environ 1000 fois plus souvent avec ce commandant précis que sa moyenne sur EDHREC — signe d'une carte de niche presque exclusivement associée à lui. À l'inverse, un staple joué partout (Sol Ring, Command Tower…) obtient un score proche de zéro, peu importe le commandant, car son taux de jeu ne varie presque pas d'un commandant à l'autre.",
+      "help.doP2": "Ces multiplicateurs sont additionnés par commandant : le score total qui apparaît sur chaque fiche n'est donc ni un pourcentage ni une note sur 100, mais simplement la somme de tous ces « ×N » sur les cartes de ta collection liées à ce commandant. Il ne se compare qu'entre commandants de ta propre analyse : plus il est élevé, plus tu as de cartes de niche qui pointent statistiquement vers lui.",
       "help.notTitle": "Ce que le résultat ne dit pas",
       "help.notP1": "L'app ne propose pas de decklist complète ni un % de complétion par rapport à une liste type — volontairement, pour ne pas te limiter aux cartes déjà populaires et te faire passer à côté de pépites plus confidentielles de ta collection. Le score de synergie indique où ta collection est déjà utile, pas une garantie que ces cartes forment ensemble un deck cohérent et jouable tel quel.",
       "help.privacyTitle": "Confidentialité",
       "help.privacyP1": "Aucune donnée n'est envoyée à un serveur autre qu'EDHREC lui-même (et Scryfall pour les images et le repli de recherche). Le fichier CSV est lu et analysé entièrement dans ton navigateur ; les résultats sont mis en cache localement (IndexedDB) pour accélérer les prochaines analyses.",
       "section.dropTitle": "Déposer l'export Moxfield",
       "dropzone.label": "Glisse ton fichier .csv ici, ou clique pour le choisir",
-      "settings.minSample": "Échantillon minimum (decks EDHREC)",
+      "settings.minSample": "Échantillon minimum de decks (EDHREC)",
+      "settings.minSampleHint": "Ignore les commandants trop peu joués sur EDHREC pour donner un score fiable — en dessous de ce nombre de decks recensés, la statistique est trop bruitée. Descends la valeur pour inclure des commandants plus confidentiels, ou monte-la pour ne garder que les plus établis.",
       "btn.start": "Lancer l'analyse",
       "btn.restoreSession": "Récupérer dernière session",
       "btn.clearCache": "Vider le cache local",
@@ -1083,7 +1093,7 @@
       "notfound.title": "Cartes non trouvées sur EDHREC",
       "notfound.body": "Ces cartes n'ont renvoyé aucune donnée EDHREC — jetons/emblèmes/produits scellés présents dans l'export, nom mal reconnu, carte trop confidentielle pour être indexée, ou simple raté réseau ponctuel. L'app tente automatiquement un repli via Scryfall avant d'abandonner. Relance l'analyse pour écarter l'hypothèse d'un raté réseau.",
       "results.title": "Fiches commandants",
-      "results.note": "Classées par score de synergie : la somme, pour chaque commandant, du <em>lift</em> de tes cartes qui lui sont statistiquement associées (bien au-delà de leur taux de jeu moyen). Un score élevé = beaucoup de tes cartes de niche collent précisément à ce commandant — pas une comparaison avec une decklist type.",
+      "results.note": "Classées par score de synergie : la somme, pour chaque commandant, du <em>lift</em> de tes cartes qui lui sont statistiquement associées — un multiplicateur (« ×N » = jouée N fois plus souvent avec ce commandant que sa moyenne), pas un pourcentage. Un score élevé = beaucoup de tes cartes de niche collent précisément à ce commandant — pas une comparaison avec une decklist type.",
       "filter.sort": "Trier",
       "filter.filter": "Filtrer",
       "sort.score": "Score de synergie",
@@ -1132,17 +1142,18 @@
       "help.exportStep1": 'Go to <code>moxfield.com</code> and open your <strong>Collection</strong>.',
       "help.exportStep2": 'Click the <strong>Export</strong> button.',
       "help.exportStep3": 'Choose the <strong>CSV</strong> format and download the file.',
-      "help.exportStep4": "Drop that file as-is below — the app automatically detects the useful columns, whatever order they're in.",
+      "help.exportStep4": "Drop that file as-is below.",
       "help.doTitle": "What the tool does",
-      "help.doP1": "For each unique card in your collection, the app looks up on EDHREC the list of commanders that play it most often, and compares that rate to the card's <em>average</em> play rate across all commanders. That gives a <strong>synergy (lift)</strong> score: a card played much more often with one specific commander than elsewhere gets a high score, while a staple played everywhere (Sol Ring, Command Tower…) scores close to zero, regardless of the commander.",
-      "help.doP2": "These scores are summed per commander, which ranks commanders by how many cards from your collection are statistically linked to them.",
+      "help.doP1": "For each unique card in your collection, the app looks up on EDHREC the list of commanders that play it most often, and compares that rate to the card's <em>average</em> play rate across all commanders. That gives a <strong>synergy (lift)</strong> score: a multiplier, not a percentage. For example, a card shown as \"×1000\" is played about 1000 times more often with that specific commander than its average across EDHREC — a sign of a niche card almost exclusively tied to it. A staple played everywhere (Sol Ring, Command Tower…), by contrast, scores close to zero regardless of the commander, since its play rate barely changes from one commander to another.",
+      "help.doP2": "These multipliers are summed per commander: the total score shown on each sheet is therefore neither a percentage nor a score out of 100, just the sum of all these \"×N\" values across the cards in your collection linked to that commander. It's only meaningful when compared across the commanders in your own analysis: the higher it is, the more niche cards you own that statistically point to that commander.",
       "help.notTitle": "What the result doesn't tell you",
       "help.notP1": "The app doesn't offer a full decklist or a completion % against a template list — deliberately, so you're not limited to already-popular cards and don't miss more niche gems in your collection. The synergy score shows where your collection is already useful, not a guarantee that these cards form a coherent, playable deck as-is.",
       "help.privacyTitle": "Privacy",
       "help.privacyP1": "No data is sent to any server other than EDHREC itself (and Scryfall for images and the search fallback). The CSV file is read and analyzed entirely in your browser; results are cached locally (IndexedDB) to speed up future analyses.",
       "section.dropTitle": "Drop your Moxfield export",
       "dropzone.label": "Drag your .csv file here, or click to choose it",
-      "settings.minSample": "Minimum sample (EDHREC decks)",
+      "settings.minSample": "Minimum deck sample (EDHREC)",
+      "settings.minSampleHint": "Skips commanders too rarely played on EDHREC to give a reliable score — below this number of recorded decks, the statistic is too noisy. Lower it to include more obscure commanders, or raise it to keep only well-established ones.",
       "btn.start": "Run analysis",
       "btn.restoreSession": "Restore last session",
       "btn.clearCache": "Clear local cache",
@@ -1159,7 +1170,7 @@
       "notfound.title": "Cards not found on EDHREC",
       "notfound.body": "These cards returned no EDHREC data — tokens/emblems/sealed products present in the export, a name that wasn't recognized, a card too obscure to be indexed, or a one-off network hiccup. The app automatically tries a Scryfall fallback before giving up. Re-run the analysis to rule out a network hiccup.",
       "results.title": "Commander sheets",
-      "results.note": "Ranked by synergy score: for each commander, the sum of the <em>lift</em> of your cards that are statistically linked to it (well beyond their average play rate). A high score = many of your niche cards fit precisely with this commander — not a comparison against a template decklist.",
+      "results.note": "Ranked by synergy score: for each commander, the sum of the <em>lift</em> of your cards that are statistically linked to it — a multiplier (\"×N\" = played N times more often with that commander than its average), not a percentage. A high score = many of your niche cards fit precisely with this commander — not a comparison against a template decklist.",
       "filter.sort": "Sort",
       "filter.filter": "Filter",
       "sort.score": "Synergy score",
