@@ -35,7 +35,6 @@
     --accent-soft: rgba(53, 214, 255, 0.08);
     --glow: 0 0 12px rgba(53, 214, 255, 0.55), 0 0 2px rgba(53, 214, 255, 0.9);
     --grid-line: rgba(90, 170, 255, 0.06);
-    --w: #f3e9c9; --u: #6fc3ff; --b: #9aa3c2; --r: #ff8a7a; --g: #6de8a6;
     --surface-text: #eaf6ff;
     color-scheme: dark;
   }
@@ -58,7 +57,6 @@
     --accent-soft: rgba(0, 145, 214, 0.06);
     --glow: 0 0 10px rgba(0, 145, 214, 0.28), 0 0 1px rgba(0, 145, 214, 0.5);
     --grid-line: rgba(0, 130, 210, 0.05);
-    --w: #7a6a2a; --u: #0091d6; --b: #576079; --r: #d9503a; --g: #1a9d63;
     color-scheme: light;
   }
 
@@ -545,7 +543,7 @@
   select option { background: var(--panel); color: var(--text); }
   @media (max-width: 560px) {
     .filter-bar { flex-direction: column; align-items: stretch; gap: 14px; }
-    .filter-group { width: 100%; flex-direction: column; align-items: flex-start; gap: 5px; }
+    .filter-group { width: 100%; flex: none; flex-direction: column; align-items: flex-start; gap: 5px; }
   }
 
   /* ---------- RESULTS ---------- */
@@ -605,8 +603,24 @@
   }
   .cc-name a { text-decoration: none; border-bottom: 1px dotted var(--accent); overflow-wrap: break-word; word-break: break-word; }
   .cc-name a:hover { border-bottom-style: solid; }
-  .cc-pips { display: inline-flex; gap: 3px; }
-  .pip { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(234,246,255,0.35); box-shadow: 0 0 4px rgba(53,214,255,0.25); }
+  .cc-pips { display: inline-flex; gap: 5px; }
+  .pip {
+    width: 13px; height: 13px;
+    border-radius: 50%;
+    border: 1.5px solid;
+    box-sizing: border-box;
+  }
+  .pip-W { background: #fdf6e3; border-color: #d9b84a; box-shadow: 0 0 6px rgba(217, 184, 74, 0.65); }
+  .pip-U { background: #3fd0ff; border-color: #0f9fd9; box-shadow: 0 0 6px rgba(63, 208, 255, 0.65); }
+  .pip-B { background: #241b33; border-color: #b565ff; box-shadow: 0 0 6px rgba(181, 101, 255, 0.65); }
+  .pip-R { background: #ff5f57; border-color: #d8362c; box-shadow: 0 0 6px rgba(255, 95, 87, 0.6); }
+  .pip-G { background: #39e58a; border-color: #1fb86a; box-shadow: 0 0 6px rgba(57, 229, 138, 0.6); }
+  .pip-c {
+    border-radius: 3px;
+    background: #b9c3d6;
+    border-color: #7c8aa8;
+    box-shadow: 0 0 6px rgba(160, 180, 210, 0.55);
+  }
 
   .copy-btn {
     display: inline-flex;
@@ -1110,6 +1124,7 @@
       "cc.moreCommanders": "Voir {a} commandant(s) de plus ({b} restant(s))",
       "preview.meta": "{name} · synergie ×{lift} · {i} / {n}",
       "copy.btn": "Copier le nom",
+      "pip.colorless": "Incolore",
     },
     en: {
       "help.summary": "How it works, and how to export your Moxfield CSV",
@@ -1185,6 +1200,7 @@
       "cc.moreCommanders": "Show {a} more commander(s) ({b} remaining)",
       "preview.meta": "{name} · synergy ×{lift} · {i} / {n}",
       "copy.btn": "Copy name",
+      "pip.colorless": "Colorless",
     },
   };
 
@@ -1718,9 +1734,7 @@
       if (!cardEl) return;
       const pipsEl = cardEl.querySelector(".cc-pips");
       if (pipsEl) {
-        pipsEl.innerHTML = entry.colorIdentity
-          .map((col) => `<span class="pip" style="background:${PIP_COLORS[col] || "#ccc"}"></span>`)
-          .join("");
+        pipsEl.innerHTML = renderPips(entry.colorIdentity);
       }
     }, REFINE_CONCURRENCY, null);
   }
@@ -1732,7 +1746,14 @@
   // ---------------------------------------------------------------------
   // Rendu
   // ---------------------------------------------------------------------
-  const PIP_COLORS = { W: "var(--w)", U: "var(--u)", B: "var(--b)", R: "var(--r)", G: "var(--g)" };
+  const PIP_CODES = ["W", "U", "B", "R", "G"];
+  function renderPips(colorIdentity) {
+    const list = (colorIdentity || []).filter((c) => PIP_CODES.includes(c));
+    if (list.length === 0) {
+      return `<span class="pip pip-c" title="${t("pip.colorless")}"></span>`;
+    }
+    return list.map((col) => `<span class="pip pip-${col}"></span>`).join("");
+  }
 
   let visibleCommanderCount = 40;
   const COMMANDER_PAGE_SIZE = 40;
@@ -1765,9 +1786,7 @@
       card.className = "commander-card" + (c.isOwned ? " owned" : "");
       card.dataset.slug = c.slug;
 
-      const pips = (c.colorIdentity || [])
-        .map((col) => `<span class="pip" style="background:${PIP_COLORS[col] || "#ccc"}"></span>`)
-        .join("");
+      const pips = renderPips(c.colorIdentity);
 
       const stampValue = c.matches.length;
       const stampUnit = c.matches.length > 1 ? t("stamp.unitPlural") : t("stamp.unitSingular");
@@ -2236,9 +2255,11 @@
     cardPreviewFrame.classList.add("loaded"); // arrête le spinner même en cas d'échec définitif
   });
 
+  let previewLoadTimer = null;
   function renderPreviewFor(name, url) {
     previewToken++;
     const token = previewToken;
+    clearTimeout(previewLoadTimer);
     cardPreviewImg.dataset.retryCount = "0";
     cardPreviewImg.classList.remove("loaded");
     cardPreviewFrame.classList.remove("loaded");
@@ -2246,14 +2267,20 @@
     cardPreviewImg.alt = name;
     currentPreviewUrl = url;
 
-    resolveScryfallImageUrl(name).then((imgUrl) => {
-      if (token !== previewToken) return; // une autre carte a été survolée entre-temps
-      if (!imgUrl) {
-        cardPreviewFrame.classList.add("loaded"); // pas d'image trouvée, on arrête le spinner
-        return;
-      }
-      cardPreviewImg.src = imgUrl;
-    });
+    // Léger débounce avant de lancer la requête réseau : protège aussi
+    // bien un survol rapide sur toute une liste qu'un clic répété sur les
+    // flèches de navigation de l'aperçu (même carte affichée plusieurs
+    // fois par seconde sinon).
+    previewLoadTimer = setTimeout(() => {
+      resolveScryfallImageUrl(name).then((imgUrl) => {
+        if (token !== previewToken) return; // une autre carte a été affichée entre-temps
+        if (!imgUrl) {
+          cardPreviewFrame.classList.add("loaded"); // pas d'image trouvée, on arrête le spinner
+          return;
+        }
+        cardPreviewImg.src = imgUrl;
+      });
+    }, 90);
   }
 
   function updatePreviewNavUI() {
