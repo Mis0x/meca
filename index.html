@@ -630,6 +630,35 @@
     box-shadow: 0 0 6px rgba(160, 180, 210, 0.55);
   }
 
+  .color-filter-group { display: flex; align-items: center; gap: 10px; }
+  .color-filter-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .color-filter-controls select { width: auto; min-width: 200px; flex: 0 0 auto; }
+  .color-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .color-toggle {
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 0;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    background-color: transparent;
+    opacity: 0.32;
+    transition: opacity 0.15s ease, transform 0.1s ease;
+  }
+  .color-toggle:hover { opacity: 0.65; }
+  .color-toggle[aria-pressed="true"] { opacity: 1; transform: scale(1.15); }
+  .color-filter-clear {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--accent-light);
+    background: none;
+    border: none;
+    border-bottom: 1px dotted var(--accent);
+    cursor: pointer;
+    padding: 0;
+    margin-left: 2px;
+  }
+
   .copy-btn {
     display: inline-flex;
     align-items: center;
@@ -1012,6 +1041,25 @@
         <option value="missing" data-i18n="owned.missing">Uniquement à acheter</option>
       </select>
     </div>
+    <div class="filter-group color-filter-group">
+      <label for="colorFilterMode" data-i18n="filter.colors">Identité couleur</label>
+      <div class="color-filter-controls">
+        <select id="colorFilterMode">
+          <option value="exact" data-i18n="color.modeExact">Identité exacte</option>
+          <option value="subset" data-i18n="color.modeSubset">Contient uniquement ces couleurs</option>
+          <option value="atleast" data-i18n="color.modeAtleast">Contient au moins ces couleurs</option>
+        </select>
+        <div class="color-filter" id="colorFilter">
+          <button type="button" class="color-toggle pip pip-W" data-color="W" aria-pressed="false" data-i18n-title="color.w" data-i18n-aria="color.w" title="Blanc" aria-label="Blanc"></button>
+          <button type="button" class="color-toggle pip pip-U" data-color="U" aria-pressed="false" data-i18n-title="color.u" data-i18n-aria="color.u" title="Bleu" aria-label="Bleu"></button>
+          <button type="button" class="color-toggle pip pip-B" data-color="B" aria-pressed="false" data-i18n-title="color.b" data-i18n-aria="color.b" title="Noir" aria-label="Noir"></button>
+          <button type="button" class="color-toggle pip pip-R" data-color="R" aria-pressed="false" data-i18n-title="color.r" data-i18n-aria="color.r" title="Rouge" aria-label="Rouge"></button>
+          <button type="button" class="color-toggle pip pip-G" data-color="G" aria-pressed="false" data-i18n-title="color.g" data-i18n-aria="color.g" title="Vert" aria-label="Vert"></button>
+          <button type="button" class="color-toggle pip pip-c" data-color="C" aria-pressed="false" data-i18n-title="pip.colorless" data-i18n-aria="pip.colorless" title="Incolore" aria-label="Incolore"></button>
+          <button type="button" class="color-filter-clear" id="colorFilterClear" data-i18n="color.clear" style="display:none;">Réinitialiser</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="results"></div>
@@ -1136,6 +1184,16 @@
       "preview.meta": "{name} · synergie ×{lift} · {i} / {n}",
       "copy.btn": "Copier le nom",
       "pip.colorless": "Incolore",
+      "filter.colors": "Identité couleur",
+      "color.modeExact": "Identité exacte",
+      "color.modeSubset": "Contient uniquement ces couleurs",
+      "color.modeAtleast": "Contient au moins ces couleurs",
+      "color.w": "Blanc",
+      "color.u": "Bleu",
+      "color.b": "Noir",
+      "color.r": "Rouge",
+      "color.g": "Vert",
+      "color.clear": "Réinitialiser",
     },
     en: {
       "help.summary": "How it works, and how to export your Moxfield CSV",
@@ -1213,6 +1271,16 @@
       "preview.meta": "{name} · synergy ×{lift} · {i} / {n}",
       "copy.btn": "Copy name",
       "pip.colorless": "Colorless",
+      "filter.colors": "Color identity",
+      "color.modeExact": "Exact identity",
+      "color.modeSubset": "Only contains these colors",
+      "color.modeAtleast": "Contains at least these colors",
+      "color.w": "White",
+      "color.u": "Blue",
+      "color.b": "Black",
+      "color.r": "Red",
+      "color.g": "Green",
+      "color.clear": "Reset",
     },
   };
 
@@ -1287,6 +1355,9 @@
     filterBar: $("filterBar"),
     sortSelect: $("sortSelect"),
     ownedFilter: $("ownedFilter"),
+    colorFilter: $("colorFilter"),
+    colorFilterMode: $("colorFilterMode"),
+    colorFilterClear: $("colorFilterClear"),
     results: $("results"),
   };
 
@@ -1769,6 +1840,29 @@
 
   let visibleCommanderCount = 40;
   const COMMANDER_PAGE_SIZE = 40;
+  let colorFilterSet = new Set(); // identité couleur sélectionnée
+
+  function commanderMatchesColorFilter(c) {
+    if (colorFilterSet.size === 0) return true;
+    const ids = new Set((c.colorIdentity || []).filter((x) => PIP_CODES.includes(x)));
+    if (colorFilterSet.has("C")) return ids.size === 0;
+
+    const mode = els.colorFilterMode.value;
+    if (mode === "subset") {
+      // Le commandant ne doit utiliser AUCUNE couleur en dehors de la sélection
+      for (const col of ids) if (!colorFilterSet.has(col)) return false;
+      return true;
+    }
+    if (mode === "atleast") {
+      // Le commandant doit contenir AU MOINS toutes les couleurs sélectionnées
+      for (const col of colorFilterSet) if (!ids.has(col)) return false;
+      return true;
+    }
+    // "exact" (défaut) : correspondance stricte, ni plus ni moins
+    if (ids.size !== colorFilterSet.size) return false;
+    for (const col of ids) if (!colorFilterSet.has(col)) return false;
+    return true;
+  }
 
   function renderResults() {
     const sortBy = els.sortSelect.value;
@@ -1777,6 +1871,7 @@
     let list = allCommanders.slice();
     if (filter === "owned") list = list.filter((c) => c.isOwned);
     if (filter === "missing") list = list.filter((c) => !c.isOwned);
+    if (colorFilterSet.size > 0) list = list.filter(commanderMatchesColorFilter);
 
     if (sortBy === "matches") {
       list.sort((a, b) => b.matches.length - a.matches.length);
@@ -2197,6 +2292,51 @@
   els.startBtn.addEventListener("click", startAnalysis);
   els.sortSelect.addEventListener("change", () => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); });
   els.ownedFilter.addEventListener("change", () => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); });
+
+  function updateColorFilterClearVisibility() {
+    els.colorFilterClear.style.display = colorFilterSet.size > 0 ? "inline-block" : "none";
+  }
+
+  els.colorFilterMode.addEventListener("change", () => {
+    if (colorFilterSet.size > 0) {
+      visibleCommanderCount = COMMANDER_PAGE_SIZE;
+      renderResults();
+    }
+  });
+
+  document.querySelectorAll(".color-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const color = btn.dataset.color;
+      const pressed = btn.getAttribute("aria-pressed") === "true";
+      if (pressed) {
+        colorFilterSet.delete(color);
+        btn.setAttribute("aria-pressed", "false");
+      } else {
+        // "Incolore" et les couleurs sont mutuellement exclusifs : une
+        // identité ne peut pas être à la fois vide et colorée.
+        if (color === "C") {
+          colorFilterSet.clear();
+          document.querySelectorAll(".color-toggle").forEach((b) => b.setAttribute("aria-pressed", "false"));
+        } else if (colorFilterSet.has("C")) {
+          colorFilterSet.delete("C");
+          els.colorFilter.querySelector('[data-color="C"]').setAttribute("aria-pressed", "false");
+        }
+        colorFilterSet.add(color);
+        btn.setAttribute("aria-pressed", "true");
+      }
+      updateColorFilterClearVisibility();
+      visibleCommanderCount = COMMANDER_PAGE_SIZE;
+      renderResults();
+    });
+  });
+
+  els.colorFilterClear.addEventListener("click", () => {
+    colorFilterSet.clear();
+    document.querySelectorAll(".color-toggle").forEach((b) => b.setAttribute("aria-pressed", "false"));
+    updateColorFilterClearVisibility();
+    visibleCommanderCount = COMMANDER_PAGE_SIZE;
+    renderResults();
+  });
   els.clearCacheBtn.addEventListener("click", async () => {
     await idbClearAll();
     imageUrlMemCache.clear();
