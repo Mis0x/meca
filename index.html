@@ -224,7 +224,7 @@
     color: var(--text);
     text-shadow: 0 0 18px rgba(53,214,255,0.18);
   }
-  .section-note { color: var(--text-dim); font-size: 14.5px; margin: 0 0 20px; max-width: 640px; }
+  .section-note { color: var(--text-dim); font-size: 14.5px; margin: 0 0 20px; }
 
   /* ---------- EXPLICATION REPLIABLE ---------- */
   .help-panel {
@@ -953,9 +953,9 @@
   </div>
 
   <div class="settings-row">
-    <div class="settings-field" style="max-width: 340px;">
+    <div class="settings-field">
       <label for="minSample" data-i18n="settings.minSample">Échantillon minimum de decks (EDHREC)</label>
-      <input type="number" id="minSample" value="120" min="0" />
+      <input type="number" id="minSample" value="120" min="0" style="max-width: 220px;" />
       <p class="field-hint" data-i18n="settings.minSampleHint">Ignore les commandants trop peu joués sur EDHREC pour donner un score fiable — en dessous de ce nombre de decks recensés, la statistique est trop bruitée. Descends la valeur pour inclure des commandants plus confidentiels, ou monte-la pour ne garder que les plus établis.</p>
     </div>
   </div>
