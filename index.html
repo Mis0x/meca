@@ -268,6 +268,7 @@
   .help-body h4:first-child { margin-top: 16px; }
   .help-body p { margin: 6px 0; color: var(--text); }
   .help-body ol, .help-body ul { margin: 6px 0; padding-left: 20px; color: var(--text); }
+  .retry-all-btn { margin: 4px 0 10px; }
   .help-body li { margin: 3px 0; }
   .help-body code {
     font-family: 'IBM Plex Mono', monospace;
@@ -630,10 +631,10 @@
     box-shadow: 0 0 6px rgba(160, 180, 210, 0.55);
   }
 
-  .color-filter-group { display: flex; align-items: center; gap: 10px; }
+  .color-filter-group { display: flex; align-items: center; gap: 10px; flex: 1 1 100%; }
   .color-filter-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .color-filter-controls select { width: auto; min-width: 200px; flex: 0 0 auto; }
-  .color-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .color-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 1 auto; }
   .color-toggle {
     appearance: none;
     -webkit-appearance: none;
@@ -987,6 +988,11 @@
       <input type="number" id="minSample" value="120" min="0" style="max-width: 220px;" />
       <p class="field-hint" data-i18n="settings.minSampleHint">Ignore les commandants trop peu joués sur EDHREC pour donner un score fiable — en dessous de ce nombre de decks recensés, la statistique est trop bruitée. Descends la valeur pour inclure des commandants plus confidentiels, ou monte-la pour ne garder que les plus établis.</p>
     </div>
+    <div class="settings-field">
+      <label for="excludeTopN" data-i18n="settings.excludeTopN">Exclure le top N des plus populaires</label>
+      <input type="number" id="excludeTopN" value="0" min="0" style="max-width: 220px;" />
+      <p class="field-hint" data-i18n="settings.excludeTopNHint">Retire de la liste les N commandants qui ont le plus de decks recensés sur EDHREC parmi ceux trouvés (0 = aucune exclusion) — utile pour écarter les têtes d'affiche déjà très jouées et faire remonter des choix plus originaux.</p>
+    </div>
   </div>
 
   <div class="actions-row">
@@ -1018,6 +1024,7 @@
     <summary id="notFoundSummary" data-i18n="notfound.title">Cartes non trouvées sur EDHREC</summary>
     <div class="help-body">
       <p data-i18n="notfound.body">Ces cartes n'ont renvoyé aucune donnée EDHREC — jetons/emblèmes/produits scellés présents dans l'export, nom mal reconnu (accents ou caractères spéciaux), carte trop confidentielle pour être indexée, ou simple raté réseau ponctuel. Relance l'analyse pour écarter cette dernière hypothèse.</p>
+      <button type="button" class="btn secondary retry-all-btn" id="retryAllBtn" data-i18n="retry.all">Tout retenter</button>
       <ul id="notFoundList"></ul>
     </div>
   </details>
@@ -1126,6 +1133,8 @@
       "dropzone.label": "Glisse ton fichier .csv ici, ou clique pour le choisir",
       "settings.minSample": "Échantillon minimum de decks (EDHREC)",
       "settings.minSampleHint": "Ignore les commandants trop peu joués sur EDHREC pour donner un score fiable — en dessous de ce nombre de decks recensés, la statistique est trop bruitée. Descends la valeur pour inclure des commandants plus confidentiels, ou monte-la pour ne garder que les plus établis.",
+      "settings.excludeTopN": "Exclure le top N des plus populaires",
+      "settings.excludeTopNHint": "Retire de la liste les N commandants qui ont le plus de decks recensés sur EDHREC parmi ceux trouvés (0 = aucune exclusion) — utile pour écarter les têtes d'affiche déjà très jouées et faire remonter des choix plus originaux.",
       "btn.start": "Lancer l'analyse",
       "btn.restoreSession": "Récupérer dernière session",
       "btn.clearCache": "Vider le cache local",
@@ -1171,6 +1180,8 @@
       "notfound.summary": "{n} carte(s) non trouvée(s) sur EDHREC",
       "retry.title": "Réessayer cette carte",
       "retry.stillNotFound": "toujours introuvable",
+      "retry.all": "Tout retenter",
+      "retry.allProgress": "Nouvel essai… {done} / {total}",
       "empty.note": "Aucun commandant ne correspond à ce filtre.",
       "stamp.unitPlural": "cartes liées",
       "stamp.unitSingular": "carte liée",
@@ -1213,6 +1224,8 @@
       "dropzone.label": "Drag your .csv file here, or click to choose it",
       "settings.minSample": "Minimum deck sample (EDHREC)",
       "settings.minSampleHint": "Skips commanders too rarely played on EDHREC to give a reliable score — below this number of recorded decks, the statistic is too noisy. Lower it to include more obscure commanders, or raise it to keep only well-established ones.",
+      "settings.excludeTopN": "Exclude the top N most popular",
+      "settings.excludeTopNHint": "Removes from the list the N commanders with the most recorded decks on EDHREC among those found (0 = no exclusion) — useful to filter out already very-played headliners and surface more original picks.",
       "btn.start": "Run analysis",
       "btn.restoreSession": "Restore last session",
       "btn.clearCache": "Clear local cache",
@@ -1258,6 +1271,8 @@
       "notfound.summary": "{n} card(s) not found on EDHREC",
       "retry.title": "Retry this card",
       "retry.stillNotFound": "still not found",
+      "retry.all": "Retry all",
+      "retry.allProgress": "Retrying… {done} / {total}",
       "empty.note": "No commander matches this filter.",
       "stamp.unitPlural": "linked cards",
       "stamp.unitSingular": "linked card",
@@ -1331,6 +1346,7 @@
     fileInput: $("fileInput"),
     fileChip: $("fileChip"),
     minSample: $("minSample"),
+    excludeTopN: $("excludeTopN"),
     startBtn: $("startBtn"),
     restoreSessionBtn: $("restoreSessionBtn"),
     clearCacheBtn: $("clearCacheBtn"),
@@ -1350,6 +1366,7 @@
     notFoundPanel: $("notFoundPanel"),
     notFoundSummary: $("notFoundSummary"),
     notFoundList: $("notFoundList"),
+    retryAllBtn: $("retryAllBtn"),
     resultsTitle: $("resultsTitle"),
     resultsNote: $("resultsNote"),
     filterBar: $("filterBar"),
@@ -1864,6 +1881,16 @@
     return true;
   }
 
+  let popularityRank = new Map(); // slug commandant -> rang de popularité (0 = le plus populaire)
+
+  function computePopularityRanks() {
+    popularityRank = new Map();
+    allCommanders
+      .slice()
+      .sort((a, b) => (b.totalDecksSample || 0) - (a.totalDecksSample || 0))
+      .forEach((c, idx) => popularityRank.set(c.slug, idx));
+  }
+
   function renderResults() {
     const sortBy = els.sortSelect.value;
     const filter = els.ownedFilter.value;
@@ -1872,6 +1899,13 @@
     if (filter === "owned") list = list.filter((c) => c.isOwned);
     if (filter === "missing") list = list.filter((c) => !c.isOwned);
     if (colorFilterSet.size > 0) list = list.filter(commanderMatchesColorFilter);
+    const excludeTopN = Math.max(0, parseInt(els.excludeTopN.value, 10) || 0);
+    if (excludeTopN > 0) {
+      list = list.filter((c) => {
+        const rank = popularityRank.get(c.slug);
+        return rank === undefined || rank >= excludeTopN;
+      });
+    }
 
     if (sortBy === "matches") {
       list.sort((a, b) => b.matches.length - a.matches.length);
@@ -2028,6 +2062,7 @@
       els.statNotFound.textContent = lastNotFoundItems.length;
       // Ré-agrège avec la carte nouvellement trouvée et rafraîchit l'affichage
       allCommanders = aggregate(lastFetchResults, lastMinSample);
+      computePopularityRanks();
       visibleCommanderCount = COMMANDER_PAGE_SIZE;
       renderResults();
     } else {
@@ -2041,6 +2076,55 @@
     if (!btn) return;
     retryNotFoundCard(btn.closest("li"));
   });
+
+  const RETRY_ALL_CONCURRENCY = 4;
+  let retryAllRunning = false;
+
+  async function retryAllNotFound() {
+    if (retryAllRunning || lastNotFoundItems.length === 0) return;
+    retryAllRunning = true;
+    const items = lastNotFoundItems.slice();
+    const originalLabel = els.retryAllBtn.textContent;
+    els.retryAllBtn.disabled = true;
+
+    const results = await runPool(
+      items,
+      async (item) => {
+        await idbDelete(STORE_CARDS, item.slug);
+        return fetchCardPage(item.slug, item.name, true);
+      },
+      RETRY_ALL_CONCURRENCY,
+      (done, total) => {
+        els.retryAllBtn.textContent = t("retry.allProgress", { done, total });
+      }
+    );
+
+    const stillNotFound = [];
+    items.forEach((item, idx) => {
+      const r = results[idx];
+      const ok = r && !r.error && r.data && !r.notFound;
+      const fetchIdx = lastFetchResults.findIndex((x) => x.slug === item.slug);
+      if (ok) {
+        if (fetchIdx !== -1) lastFetchResults[fetchIdx].data = r.data;
+      } else {
+        stillNotFound.push(item);
+      }
+    });
+
+    allCommanders = aggregate(lastFetchResults, lastMinSample);
+    computePopularityRanks();
+    visibleCommanderCount = COMMANDER_PAGE_SIZE;
+    renderResults();
+    renderNotFoundList(stillNotFound);
+    els.statNotFound.textContent = stillNotFound.length;
+    updateClearCacheVisibility();
+
+    els.retryAllBtn.disabled = false;
+    els.retryAllBtn.textContent = originalLabel;
+    retryAllRunning = false;
+  }
+
+  els.retryAllBtn.addEventListener("click", retryAllNotFound);
 
   // ---------------------------------------------------------------------
   // Copie du nom de carte
@@ -2175,6 +2259,7 @@
 
     progressStateKey = "progress.aggregating"; els.progressLabel.textContent = t("progress.aggregating");
     allCommanders = aggregate(results, minSample);
+    computePopularityRanks();
 
     els.statCommanders.textContent = allCommanders.length;
     els.statOwnedCommanders.textContent = ownedCommanderSlugs.size;
@@ -2289,9 +2374,35 @@
     try { localStorage.setItem(MIN_SAMPLE_KEY, els.minSample.value); } catch (e) {}
   });
 
+  const EXCLUDE_TOP_N_KEY = "moxedh_exclude_top_n";
+  try {
+    const savedExcludeTopN = localStorage.getItem(EXCLUDE_TOP_N_KEY);
+    if (savedExcludeTopN !== null && savedExcludeTopN !== "") {
+      els.excludeTopN.value = savedExcludeTopN;
+    }
+  } catch (e) {}
+  els.excludeTopN.addEventListener("change", () => {
+    try { localStorage.setItem(EXCLUDE_TOP_N_KEY, els.excludeTopN.value); } catch (e) {}
+    // Purement basé sur des données déjà en mémoire : se réapplique
+    // instantanément si des résultats sont déjà affichés, sans réanalyse.
+    if (allCommanders.length) {
+      visibleCommanderCount = COMMANDER_PAGE_SIZE;
+      renderResults();
+    }
+  });
+
   els.startBtn.addEventListener("click", startAnalysis);
-  els.sortSelect.addEventListener("change", () => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); });
-  els.ownedFilter.addEventListener("change", () => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); });
+  // Le re-rendu (mise à jour du DOM/layout) est différé au tick suivant :
+  // sur certains navigateurs mobiles, mettre à jour la mise en page
+  // pendant que le picker natif du <select> se referme peut le faire
+  // se rouvrir tout seul juste après (visible en tapant le dernier
+  // élément de la liste puis en changeant de valeur plusieurs fois).
+  els.sortSelect.addEventListener("change", () => {
+    setTimeout(() => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); }, 0);
+  });
+  els.ownedFilter.addEventListener("change", () => {
+    setTimeout(() => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); }, 0);
+  });
 
   function updateColorFilterClearVisibility() {
     els.colorFilterClear.style.display = colorFilterSet.size > 0 ? "inline-block" : "none";
@@ -2299,8 +2410,7 @@
 
   els.colorFilterMode.addEventListener("change", () => {
     if (colorFilterSet.size > 0) {
-      visibleCommanderCount = COMMANDER_PAGE_SIZE;
-      renderResults();
+      setTimeout(() => { visibleCommanderCount = COMMANDER_PAGE_SIZE; renderResults(); }, 0);
     }
   });
 
