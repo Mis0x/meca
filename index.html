@@ -389,7 +389,7 @@
     line-height: 1.5;
     color: var(--text-dim);
   }
-  .color-filter-hint { margin-top: -2px; margin-bottom: 6px; }
+  .color-filter-hint { flex: 1 1 100%; margin-top: -2px; margin-bottom: 6px; }
   #excludeTopNStatus { margin-top: 5px; color: var(--accent-light); }
   input[type="text"], input[type="url"], input[type="number"] {
     width: 100%;
@@ -1071,8 +1071,8 @@
       <input type="number" id="excludeTopN" value="0" min="0" />
       <span class="field-hint" id="excludeTopNStatus" style="display:none;"></span>
     </div>
+    <p class="field-hint color-filter-hint" data-i18n="settings.excludeTopNHint">Retire les commandants dont le rang EDHREC réel (toutes commandants confondus, pas seulement ceux de cette analyse) est inférieur ou égal à N — par exemple 1400 exclut tout ce qui est classé #1 à #1400 (0 = aucune exclusion). Le premier réglage télécharge le rang de chaque commandant concerné, ce qui peut prendre quelques secondes.</p>
   </div>
-  <p class="field-hint color-filter-hint" data-i18n="settings.excludeTopNHint">Retire les commandants dont le rang EDHREC réel (toutes commandants confondus, pas seulement ceux de cette analyse) est inférieur ou égal à N — par exemple 1400 exclut tout ce qui est classé #1 à #1400 (0 = aucune exclusion). Le premier réglage télécharge le rang de chaque commandant concerné, ce qui peut prendre quelques secondes.</p>
 
   <div id="results"></div>
 </div>
@@ -1199,6 +1199,7 @@
       "cc.toggleHide": "Masquer les cartes associées ↑",
       "cc.moreCards": "Voir {n} carte(s) de plus ↓",
       "cc.moreCommanders": "Voir {a} commandant(s) de plus ({b} restant(s))",
+      "cc.moreCommandersLazy": "Voir plus de commandants ↓",
       "preview.meta": "{name} · synergie ×{lift} · {i} / {n}",
       "copy.btn": "Copier le nom",
       "pip.colorless": "Incolore",
@@ -1292,6 +1293,7 @@
       "cc.toggleHide": "Hide linked cards ↑",
       "cc.moreCards": "Show {n} more card(s) ↓",
       "cc.moreCommanders": "Show {a} more commander(s) ({b} remaining)",
+      "cc.moreCommandersLazy": "Show more commanders ↓",
       "preview.meta": "{name} · synergy ×{lift} · {i} / {n}",
       "copy.btn": "Copy name",
       "pip.colorless": "Colorless",
@@ -1939,37 +1941,78 @@
     return metaBits.join(" · ");
   }
 
-  function renderResults() {
+  let renderToken = 0;
+
+  // Avance dans baseList (déjà filtrée/triée, mais PAS encore filtrée par
+  // rang) en ne vérifiant le rang EDHREC que des commandants réellement
+  // nécessaires pour remplir la page — jamais l'ensemble des candidats.
+  // Se relance par lots de COMMANDER_PAGE_SIZE jusqu'à réunir assez de
+  // commandants acceptés (ou épuiser la liste).
+  async function collectAcceptedList(baseList, targetCount, excludeTopN, myToken) {
+    const accepted = [];
+    let idx = 0;
+    while (accepted.length < targetCount && idx < baseList.length) {
+      const batchEnd = Math.min(idx + COMMANDER_PAGE_SIZE, baseList.length);
+      const batch = baseList.slice(idx, batchEnd);
+      const unknown = batch.filter((c) => c.edhrecRank === undefined);
+      if (unknown.length > 0) {
+        els.excludeTopNStatus.style.display = "block";
+        await ensureCommanderRanks(unknown, (done, total) => {
+          if (myToken === renderToken) {
+            els.excludeTopNStatus.textContent = t("settings.excludeTopNProgress", { done, total });
+          }
+        });
+        if (myToken !== renderToken) return null; // un rendu plus récent a pris le relais
+      }
+      for (let i = idx; i < batchEnd && accepted.length < targetCount; i++) {
+        const c = baseList[i];
+        if (!c.edhrecRank || c.edhrecRank > excludeTopN) accepted.push(c);
+      }
+      idx = batchEnd;
+    }
+    els.excludeTopNStatus.style.display = "none";
+    return { accepted, exhausted: idx >= baseList.length };
+  }
+
+  async function renderResults() {
+    const myToken = ++renderToken;
     const sortBy = els.sortSelect.value;
     const filter = els.ownedFilter.value;
 
-    let list = allCommanders.slice();
-    if (filter === "owned") list = list.filter((c) => c.isOwned);
-    if (filter === "missing") list = list.filter((c) => !c.isOwned);
-    if (colorFilterSet.size > 0) list = list.filter(commanderMatchesColorFilter);
-    const excludeTopN = Math.max(0, parseInt(els.excludeTopN.value, 10) || 0);
-    if (excludeTopN > 0) {
-      // c.edhrecRank est le rang EDHREC réel (tous commandants confondus,
-      // pas seulement ceux trouvés dans cette analyse) ; null/undefined =
-      // pas encore récupéré, on garde le commandant par défaut plutôt que
-      // de le masquer à tort.
-      list = list.filter((c) => !c.edhrecRank || c.edhrecRank > excludeTopN);
-    }
+    let baseList = allCommanders.slice();
+    if (filter === "owned") baseList = baseList.filter((c) => c.isOwned);
+    if (filter === "missing") baseList = baseList.filter((c) => !c.isOwned);
+    if (colorFilterSet.size > 0) baseList = baseList.filter(commanderMatchesColorFilter);
 
     if (sortBy === "matches") {
-      list.sort((a, b) => b.matches.length - a.matches.length);
+      baseList.sort((a, b) => b.matches.length - a.matches.length);
     } else {
-      list.sort((a, b) => b.totalLift - a.totalLift);
+      baseList.sort((a, b) => b.totalLift - a.totalLift);
     }
+
+    const excludeTopN = Math.max(0, parseInt(els.excludeTopN.value, 10) || 0);
+
+    let visibleList, hasMore, lazyMode;
+    if (excludeTopN <= 0) {
+      visibleList = baseList.slice(0, visibleCommanderCount);
+      hasMore = baseList.length > visibleCommanderCount;
+      lazyMode = false;
+    } else {
+      lazyMode = true;
+      const result = await collectAcceptedList(baseList, visibleCommanderCount, excludeTopN, myToken);
+      if (!result) return; // un rendu plus récent a pris le relais entre-temps
+      visibleList = result.accepted;
+      hasMore = !result.exhausted;
+    }
+
+    if (myToken !== renderToken) return; // idem, sécurité supplémentaire
 
     els.results.innerHTML = "";
 
-    if (list.length === 0) {
+    if (visibleList.length === 0) {
       els.results.innerHTML = `<p class="empty-note">${t("empty.note")}</p>`;
       return;
     }
-
-    const visibleList = list.slice(0, visibleCommanderCount);
 
     visibleList.forEach((c, i) => {
       const card = document.createElement("div");
@@ -2035,15 +2078,14 @@
     // précédente) ne redéclenchent aucune requête.
     refineVisibleColors(visibleList);
 
-    if (list.length > visibleCommanderCount) {
-      const remaining = list.length - visibleCommanderCount;
+    if (hasMore) {
+      const remaining = baseList.length - visibleCommanderCount;
       const loadMoreBtn = document.createElement("button");
       loadMoreBtn.className = "btn secondary load-more-btn";
       loadMoreBtn.type = "button";
-      loadMoreBtn.textContent = t("cc.moreCommanders", {
-        a: Math.min(COMMANDER_PAGE_SIZE, remaining),
-        b: remaining,
-      });
+      loadMoreBtn.textContent = lazyMode
+        ? t("cc.moreCommandersLazy")
+        : t("cc.moreCommanders", { a: Math.min(COMMANDER_PAGE_SIZE, remaining), b: remaining });
       loadMoreBtn.addEventListener("click", () => {
         visibleCommanderCount += COMMANDER_PAGE_SIZE;
         renderResults();
@@ -2106,7 +2148,6 @@
       allCommanders = aggregate(lastFetchResults, lastMinSample);
       visibleCommanderCount = COMMANDER_PAGE_SIZE;
       renderResults();
-      if (parseInt(els.excludeTopN.value, 10) > 0) applyExcludeTopNFilter();
     } else {
       btn.disabled = false;
       status.textContent = t("retry.stillNotFound");
@@ -2159,7 +2200,6 @@
     renderNotFoundList(stillNotFound);
     els.statNotFound.textContent = stillNotFound.length;
     updateClearCacheVisibility();
-    if (parseInt(els.excludeTopN.value, 10) > 0) applyExcludeTopNFilter();
 
     els.retryAllBtn.disabled = false;
     els.retryAllBtn.textContent = originalLabel;
@@ -2318,7 +2358,6 @@
     renderResults();
     updateClearCacheVisibility();
     els.resultsTitle.scrollIntoView({ behavior: "smooth", block: "start" });
-    if (parseInt(els.excludeTopN.value, 10) > 0) applyExcludeTopNFilter();
   }
 
   // ---------------------------------------------------------------------
@@ -2417,11 +2456,13 @@
   });
 
   const RANK_FETCH_CONCURRENCY = 8;
-  let ranksFetchRunning = false;
 
   // Récupère le rang EDHREC réel des commandants qui ne l'ont pas encore
-  // (mise en cache via fetchCommanderPage, donc peu coûteux au-delà du
-  // premier réglage). N'affecte que les commandants passés en paramètre.
+  // (mise en cache via fetchCommanderPage, donc peu coûteux la fois
+  // suivante). N'affecte que les commandants passés en paramètre : c'est
+  // renderResults() qui décide lesquels sont réellement nécessaires
+  // (seulement ceux qui pourraient apparaître sur la page courante), pas
+  // l'ensemble des commandants candidats de l'analyse.
   async function ensureCommanderRanks(commanders, onProgress) {
     const missing = commanders.filter((c) => c.edhrecRank === undefined);
     if (missing.length === 0) return;
@@ -2430,31 +2471,16 @@
       async (c) => {
         const data = await fetchCommanderPage(c.slug);
         c.edhrecRank = data ? extractCommanderRank(data) : null;
+        // Autant en profiter : cette page contient aussi l'identité couleur
+        // exacte, ce qui évite une requête séparée pour refineVisibleColors.
+        if (data && !c.colorExact) {
+          c.colorIdentity = extractColorIdentity(data);
+          c.colorExact = true;
+        }
       },
       RANK_FETCH_CONCURRENCY,
       onProgress
     );
-  }
-
-  async function applyExcludeTopNFilter() {
-    const excludeTopN = Math.max(0, parseInt(els.excludeTopN.value, 10) || 0);
-    if (excludeTopN <= 0 || !allCommanders.length) {
-      visibleCommanderCount = COMMANDER_PAGE_SIZE;
-      renderResults();
-      return;
-    }
-    const missing = allCommanders.filter((c) => c.edhrecRank === undefined);
-    if (missing.length > 0) {
-      ranksFetchRunning = true;
-      els.excludeTopNStatus.style.display = "block";
-      await ensureCommanderRanks(allCommanders, (done, total) => {
-        els.excludeTopNStatus.textContent = t("settings.excludeTopNProgress", { done, total });
-      });
-      ranksFetchRunning = false;
-      els.excludeTopNStatus.style.display = "none";
-    }
-    visibleCommanderCount = COMMANDER_PAGE_SIZE;
-    renderResults();
   }
 
   const EXCLUDE_TOP_N_KEY = "moxedh_exclude_top_n";
@@ -2466,7 +2492,10 @@
   } catch (e) {}
   els.excludeTopN.addEventListener("change", () => {
     try { localStorage.setItem(EXCLUDE_TOP_N_KEY, els.excludeTopN.value); } catch (e) {}
-    if (allCommanders.length && !ranksFetchRunning) applyExcludeTopNFilter();
+    if (allCommanders.length) {
+      visibleCommanderCount = COMMANDER_PAGE_SIZE;
+      renderResults();
+    }
   });
 
   els.startBtn.addEventListener("click", startAnalysis);
