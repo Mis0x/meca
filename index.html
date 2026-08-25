@@ -623,7 +623,7 @@
     border: 1.5px solid;
     box-sizing: border-box;
   }
-  .pip-W { background: #d9b84a; border-color: #a3821f; box-shadow: 0 0 6px rgba(217, 184, 74, 0.65); }
+  .pip-W { background: #ffe14d; border-color: #c9a300; box-shadow: 0 0 7px rgba(255, 225, 77, 0.8); }
   .pip-U { background: #3fd0ff; border-color: #0f9fd9; box-shadow: 0 0 6px rgba(63, 208, 255, 0.65); }
   .pip-B { background: #b565ff; border-color: #7a2fd6; box-shadow: 0 0 6px rgba(181, 101, 255, 0.65); }
   .pip-R { background: #ff5f57; border-color: #d8362c; box-shadow: 0 0 6px rgba(255, 95, 87, 0.6); }
@@ -639,6 +639,11 @@
   .color-filter-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .color-filter-controls select { width: auto; min-width: 200px; flex: 0 0 auto; }
   .color-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 1 auto; }
+  @media (max-width: 560px) {
+    .color-filter-group { flex-direction: column; align-items: flex-start; gap: 5px; }
+    .color-filter-controls { flex-direction: column; align-items: flex-start; width: 100%; gap: 8px; }
+    .color-filter-controls select { width: 100%; min-width: 0; }
+  }
   .color-toggle {
     appearance: none;
     -webkit-appearance: none;
@@ -754,16 +759,16 @@
   #cardPreviewBackdrop {
     position: fixed;
     inset: 0;
-    background: rgba(10, 16, 12, 0.4);
+    background: transparent;
     z-index: 999;
     display: none;
     pointer-events: none; /* laisse passer le hover vers les liens en dessous */
-    transition: background-color 0.15s ease;
   }
   #cardPreviewBackdrop.show { display: block; }
   #cardPreviewBackdrop.touch-active {
     background: rgba(10, 16, 12, 0.65);
     pointer-events: auto; /* le tap sur le fond ferme l'aperçu */
+    transition: background-color 0.15s ease;
   }
   .card-preview {
     position: fixed;
