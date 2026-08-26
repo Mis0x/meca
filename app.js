@@ -1058,6 +1058,13 @@
     lastFetchResults = results;
     lastMinSample = minSample;
 
+    // Pré-chauffe le cache d'images en tâche de fond (non bloquant, faible
+    // concurrence) : les cartes de la collection importée sont exactement
+    // celles qui vont apparaître dans les résultats et être survolées
+    // ensuite pour l'aperçu. Volontairement non "await" pour ne pas
+    // retarder l'affichage des résultats.
+    prewarmImageCache(items.map((it) => it.name));
+
     progressStateKey = "progress.aggregating"; els.progressLabel.textContent = t("progress.aggregating");
     allCommanders = aggregate(results, minSample);
 
@@ -1304,21 +1311,27 @@
   const imageUrlMemCache = new Map(); // nom de carte -> URL CDN Scryfall résolue (cache mémoire, session)
   const IMAGE_URL_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
 
-  // Résout le nom d'une carte vers son URL d'image directe sur le CDN
+  // Résout le nom d'une carte vers ses URLs d'image directes sur le CDN
   // Scryfall (cards.scryfall.io), au lieu de réinterroger à chaque survol
   // le point d'entrée /cards/named?...&format=image (recherche floue +
   // redirection, soumis aux limites de débit de l'API Scryfall). Le
-  // résultat est mis en cache en mémoire puis dans IndexedDB : au bout
-  // d'un moment de défilement, la grande majorité des cartes déjà vues
-  // se résolvent instantanément sans requête réseau, ce qui évite le
-  // "cadre blanc" observé après une longue session de survol.
+  // résultat ({small, large}) est mis en cache en mémoire puis dans
+  // IndexedDB : au bout d'un moment de défilement, la grande majorité des
+  // cartes déjà vues se résolvent instantanément sans requête réseau, ce
+  // qui évite le "cadre blanc" observé après une longue session de survol.
+  // On récupère à la fois "small" (léger, affiché en premier pour un
+  // rendu quasi instantané) et "large" (qualité finale, chargée en
+  // arrière-plan puis substituée une fois prête).
   async function resolveScryfallImageUrl(name) {
     if (imageUrlMemCache.has(name)) return imageUrlMemCache.get(name);
 
     const cached = await idbGet(STORE_IMAGES, name);
-    if (cached && cached.url && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
-      imageUrlMemCache.set(name, cached.url);
-      return cached.url;
+    if (cached && (cached.small || cached.url) && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
+      // Compat avec les anciennes entrées de cache (avant l'ajout du
+      // couple small/large) qui ne stockaient qu'un champ "url".
+      const urls = { small: cached.small || cached.url, large: cached.large || cached.url };
+      imageUrlMemCache.set(name, urls);
+      return urls;
     }
 
     try {
@@ -1327,14 +1340,32 @@
       if (!res.ok) return null;
       const json = await res.json();
       const faceImages = json.image_uris || (json.card_faces && json.card_faces[0] && json.card_faces[0].image_uris);
-      const imgUrl = faceImages && (faceImages.large || faceImages.normal || faceImages.png);
-      if (!imgUrl) return null;
-      imageUrlMemCache.set(name, imgUrl);
-      idbSet(STORE_IMAGES, { name, url: imgUrl, fetchedAt: Date.now() });
-      return imgUrl;
+      if (!faceImages) return null;
+      const large = faceImages.large || faceImages.normal || faceImages.png;
+      const small = faceImages.small || large;
+      if (!large && !small) return null;
+      const urls = { small, large: large || small };
+      imageUrlMemCache.set(name, urls);
+      idbSet(STORE_IMAGES, { name, small: urls.small, large: urls.large, fetchedAt: Date.now() });
+      return urls;
     } catch (err) {
       return null;
     }
+  }
+
+  const IMAGE_PREWARM_CONCURRENCY = 4; // discret : ne doit pas concurrencer les requêtes prioritaires (cartes/commandants)
+
+  // Pré-résout en arrière-plan (faible concurrence, non bloquant) les
+  // images des cartes fournies. Appelé juste après l'analyse principale
+  // avec les noms de la collection importée : ce sont précisément les
+  // cartes qui apparaîtront dans les listes de résultats (matches de
+  // commandants, cartes non trouvées), donc les plus susceptibles d'être
+  // survolées ensuite. Au moment du survol, resolveScryfallImageUrl
+  // trouve déjà l'entrée en cache mémoire/IndexedDB : plus de requête
+  // réseau visible, l'aperçu s'affiche immédiatement.
+  async function prewarmImageCache(names) {
+    const uniqueNames = Array.from(new Set(names));
+    await runPool(uniqueNames, (name) => resolveScryfallImageUrl(name), IMAGE_PREWARM_CONCURRENCY);
   }
 
   cardPreviewImg.addEventListener("load", () => {
@@ -1371,20 +1402,37 @@
     cardPreviewImg.alt = name;
     currentPreviewUrl = url;
 
+    // Si la carte est déjà résolue (cache mémoire, typiquement pré-chauffé
+    // en arrière-plan via prewarmImageCache), on saute le débounce :
+    // aucune requête réseau à protéger, autant afficher tout de suite.
+    const delay = imageUrlMemCache.has(name) ? 0 : 90;
+
     // Léger débounce avant de lancer la requête réseau : protège aussi
     // bien un survol rapide sur toute une liste qu'un clic répété sur les
     // flèches de navigation de l'aperçu (même carte affichée plusieurs
     // fois par seconde sinon).
     previewLoadTimer = setTimeout(() => {
-      resolveScryfallImageUrl(name).then((imgUrl) => {
+      resolveScryfallImageUrl(name).then((urls) => {
         if (token !== previewToken) return; // une autre carte a été affichée entre-temps
-        if (!imgUrl) {
+        if (!urls) {
           cardPreviewFrame.classList.add("loaded"); // pas d'image trouvée, on arrête le spinner
           return;
         }
-        cardPreviewImg.src = imgUrl;
+        // Affichage progressif : la vignette "small" (légère) apparaît en
+        // premier pour un rendu quasi instantané, puis on la remplace par
+        // "large" une fois celle-ci chargée en arrière-plan — sans jamais
+        // faire attendre l'utilisateur devant un cadre vide.
+        cardPreviewImg.src = urls.small;
+        if (urls.large && urls.large !== urls.small) {
+          const hiRes = new Image();
+          hiRes.onload = () => {
+            if (token !== previewToken) return; // carte changée entre-temps
+            cardPreviewImg.src = urls.large;
+          };
+          hiRes.src = urls.large;
+        }
       });
-    }, 90);
+    }, delay);
   }
 
   function updatePreviewNavUI() {
