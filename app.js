@@ -297,11 +297,11 @@
   // (Scryfall lent, Wi-Fi capricieux…) ne fasse tourner un spinner à
   // l'infini ou ne bloque un worker de l'analyse en masse.
   const FETCH_TIMEOUT_MS = 9000;
-  async function fetchWithTimeout(url, ms) {
+  async function fetchWithTimeout(url, ms, options) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms || FETCH_TIMEOUT_MS);
     try {
-      return await fetch(url, { signal: controller.signal });
+      return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
     } finally {
       clearTimeout(timer);
     }
@@ -1077,6 +1077,14 @@
     renderResults();
     updateClearCacheVisibility();
     els.resultsTitle.scrollIntoView({ behavior: "smooth", block: "start" });
+
+    // Préchauffage des images en tâche de fond : ne bloque rien, se contente
+    // de peupler le cache pendant que l'utilisateur consulte les résultats,
+    // pour que le premier survol de chaque carte soit déjà instantané.
+    const namesToWarm = new Set();
+    for (const item of collection.values()) namesToWarm.add(item.name);
+    for (const c of allCommanders) namesToWarm.add(c.name);
+    warmUpImageCache(Array.from(namesToWarm));
   }
 
   // ---------------------------------------------------------------------
@@ -1335,6 +1343,63 @@
     } catch (err) {
       return null;
     }
+  }
+
+  const IMAGE_WARMUP_BATCH_SIZE = 75; // maximum autorisé par l'API Scryfall /cards/collection
+  const IMAGE_WARMUP_CONCURRENCY = 3;
+
+  // Préchauffe le cache d'images en résolvant beaucoup de cartes d'un coup
+  // via l'API "collection" de Scryfall (jusqu'à 75 cartes par requête, au
+  // lieu d'une recherche floue par carte). Lancé en tâche de fond juste
+  // après l'analyse principale : par défaut la résolution reste paresseuse
+  // (au survol), mais comme la quasi-totalité des cartes affichées dans les
+  // résultats appartiennent à la collection qu'on vient d'analyser, les
+  // précharger pendant que l'utilisateur lit les résultats fait disparaître
+  // le petit délai de résolution au premier survol de chaque carte.
+  async function warmUpImageCache(names) {
+    const uniqueNames = Array.from(new Set(names));
+    const toFetch = [];
+    for (const name of uniqueNames) {
+      if (imageUrlMemCache.has(name)) continue;
+      const cached = await idbGet(STORE_IMAGES, name);
+      if (cached && cached.url && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
+        imageUrlMemCache.set(name, cached.url);
+      } else {
+        toFetch.push(name);
+      }
+    }
+    if (toFetch.length === 0) return;
+
+    const batches = [];
+    for (let i = 0; i < toFetch.length; i += IMAGE_WARMUP_BATCH_SIZE) {
+      batches.push(toFetch.slice(i, i + IMAGE_WARMUP_BATCH_SIZE));
+    }
+
+    await runPool(
+      batches,
+      async (batch) => {
+        try {
+          const res = await fetchWithTimeout("https://api.scryfall.com/cards/collection", 15000, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifiers: batch.map((name) => ({ name })) }),
+          });
+          if (!res.ok) return;
+          const json = await res.json();
+          for (const card of json.data || []) {
+            const faceImages = card.image_uris || (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris);
+            const imgUrl = faceImages && (faceImages.large || faceImages.normal || faceImages.png);
+            if (!imgUrl || !card.name) continue;
+            imageUrlMemCache.set(card.name, imgUrl);
+            idbSet(STORE_IMAGES, { name: card.name, url: imgUrl, fetchedAt: Date.now() });
+          }
+        } catch (err) {
+          /* échec silencieux : le survol retombera sur la résolution à la demande */
+        }
+      },
+      IMAGE_WARMUP_CONCURRENCY,
+      null
+    );
   }
 
   cardPreviewImg.addEventListener("load", () => {
