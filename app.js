@@ -15,7 +15,7 @@
   const STORE_SESSION = "session";
   const STORE_IMAGES = "images";
   const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
-  const FETCH_CONCURRENCY = 12; // requêtes cartes en parallèle pendant l'analyse principale
+  const FETCH_CONCURRENCY = 18; // requêtes cartes en parallèle pendant l'analyse principale (EDHREC tolère bien cette charge ; au-delà de ~24-25 le risque de 429 augmente sans gain net)
   const REFINE_CONCURRENCY = 6; // requêtes commandants en parallèle pour le top N
   const MAX_RETRIES = 2; // nouvelles tentatives sur échec réseau transitoire
 
@@ -297,11 +297,11 @@
   // (Scryfall lent, Wi-Fi capricieux…) ne fasse tourner un spinner à
   // l'infini ou ne bloque un worker de l'analyse en masse.
   const FETCH_TIMEOUT_MS = 9000;
-  async function fetchWithTimeout(url, ms, options) {
+  async function fetchWithTimeout(url, ms) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms || FETCH_TIMEOUT_MS);
     try {
-      return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+      return await fetch(url, { signal: controller.signal });
     } finally {
       clearTimeout(timer);
     }
@@ -342,37 +342,38 @@
   }
 
   // Tente la page carte EDHREC via le slug local (en essayant chaque face
-  // pour les cartes double-face, une opération purement locale donc peu
-  // coûteuse). Le repli réseau via Scryfall (related_uris.edhrec) n'est
-  // déclenché que lorsque useScryfallFallback est explicitement demandé
-  // (bouton "réessayer" individuel) : l'activer pour chaque carte non
-  // trouvée pendant l'analyse en masse (jetons, émblèmes, produits scellés
-  // qui ne seront de toute façon jamais indexés) multiplierait les
-  // requêtes réseau et ralentirait l'analyse de collections volumineuses.
+  // pour les cartes double-face). Les candidats sont interrogés en
+  // parallèle (au lieu d'un essai séquentiel candidat par candidat) : pour
+  // une carte double-face non trouvée sous sa première face, on ne paie
+  // plus deux allers-retours l'un après l'autre (jusqu'à 2× le temps
+  // d'attente/timeout), juste un seul, le temps du plus lent des deux.
+  // Le repli réseau via Scryfall (related_uris.edhrec) n'est déclenché
+  // que lorsque useScryfallFallback est explicitement demandé (bouton
+  // "réessayer" individuel) : l'activer pour chaque carte non trouvée
+  // pendant l'analyse en masse (jetons, émblèmes, produits scellés qui ne
+  // seront de toute façon jamais indexés) multiplierait les requêtes
+  // réseau et ralentirait l'analyse de collections volumineuses.
   async function fetchCardPage(slug, cardName, useScryfallFallback) {
     const cached = await idbGet(STORE_CARDS, slug);
     if (cached && Date.now() - cached.fetchedAt < CACHE_MAX_AGE_MS) {
       return { data: cached.data, fromCache: true, notFound: cached.notFound || false };
     }
 
-    const tried = new Set();
     const candidates = cardName ? candidateSlugs(cardName) : [slug];
     if (!candidates.includes(slug)) candidates.unshift(slug);
 
-    let lastResult = { data: null, notFound: true };
-    for (const candidate of candidates) {
-      if (tried.has(candidate)) continue;
-      tried.add(candidate);
-      lastResult = await fetchCardPageRaw(candidate);
-      if (lastResult.data) {
-        await idbSet(STORE_CARDS, { slug, data: lastResult.data, notFound: false, fetchedAt: Date.now() });
-        return { data: lastResult.data, fromCache: false, notFound: false };
-      }
+    const attempts = await Promise.all(candidates.map((candidate) => fetchCardPageRaw(candidate)));
+    const hit = attempts.find((r) => r.data);
+    if (hit) {
+      await idbSet(STORE_CARDS, { slug, data: hit.data, notFound: false, fetchedAt: Date.now() });
+      return { data: hit.data, fromCache: false, notFound: false };
     }
+    const lastResult = attempts[attempts.length - 1] || { data: null, notFound: true };
 
     if (useScryfallFallback && cardName) {
+      const triedSet = new Set(candidates);
       const altSlug = await resolveEdhrecSlugViaScryfall(cardName);
-      if (altSlug && !tried.has(altSlug)) {
+      if (altSlug && !triedSet.has(altSlug)) {
         const alt = await fetchCardPageRaw(altSlug);
         if (alt.data) {
           await idbSet(STORE_CARDS, { slug, data: alt.data, notFound: false, fetchedAt: Date.now(), viaScryfall: true });
@@ -1019,6 +1020,15 @@
 
     progressStateKey = "progress.fetching"; els.progressLabel.textContent = t("progress.fetching");
 
+    // Les mises à jour du panneau de progression sont throttlées : avec une
+    // concurrence réseau élevée, de nombreuses requêtes se terminent dans
+    // la même poignée de millisecondes, et repeindre 7-8 nœuds DOM (dont un
+    // prepend dans le journal) à chaque fois ralentit inutilement le thread
+    // principal — donc l'analyse elle-même. On ne redessine qu'au maximum
+    // une fois tous les 100ms, avec une mise à jour finale garantie.
+    let lastProgressPaint = 0;
+    const PROGRESS_UI_THROTTLE_MS = 100;
+
     const results = await runPool(
       items,
       async (item) => {
@@ -1043,6 +1053,10 @@
       },
       FETCH_CONCURRENCY,
       (done, total, item) => {
+        const now = Date.now();
+        const isLast = done === total;
+        if (!isLast && now - lastProgressPaint < PROGRESS_UI_THROTTLE_MS) return;
+        lastProgressPaint = now;
         els.progressCount.textContent = done + " / " + total;
         els.progressFill.style.width = Math.round((done / total) * 100) + "%";
         logLine("→ " + item.name);
@@ -1057,6 +1071,13 @@
 
     lastFetchResults = results;
     lastMinSample = minSample;
+
+    // Pré-chauffe le cache d'images en tâche de fond (non bloquant, faible
+    // concurrence) : les cartes de la collection importée sont exactement
+    // celles qui vont apparaître dans les résultats et être survolées
+    // ensuite pour l'aperçu. Volontairement non "await" pour ne pas
+    // retarder l'affichage des résultats.
+    prewarmImageCache(items.map((it) => it.name));
 
     progressStateKey = "progress.aggregating"; els.progressLabel.textContent = t("progress.aggregating");
     allCommanders = aggregate(results, minSample);
@@ -1077,14 +1098,6 @@
     renderResults();
     updateClearCacheVisibility();
     els.resultsTitle.scrollIntoView({ behavior: "smooth", block: "start" });
-
-    // Préchauffage des images en tâche de fond : ne bloque rien, se contente
-    // de peupler le cache pendant que l'utilisateur consulte les résultats,
-    // pour que le premier survol de chaque carte soit déjà instantané.
-    const namesToWarm = new Set();
-    for (const item of collection.values()) namesToWarm.add(item.name);
-    for (const c of allCommanders) namesToWarm.add(c.name);
-    warmUpImageCache(Array.from(namesToWarm));
   }
 
   // ---------------------------------------------------------------------
@@ -1312,21 +1325,27 @@
   const imageUrlMemCache = new Map(); // nom de carte -> URL CDN Scryfall résolue (cache mémoire, session)
   const IMAGE_URL_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
 
-  // Résout le nom d'une carte vers son URL d'image directe sur le CDN
+  // Résout le nom d'une carte vers ses URLs d'image directes sur le CDN
   // Scryfall (cards.scryfall.io), au lieu de réinterroger à chaque survol
   // le point d'entrée /cards/named?...&format=image (recherche floue +
   // redirection, soumis aux limites de débit de l'API Scryfall). Le
-  // résultat est mis en cache en mémoire puis dans IndexedDB : au bout
-  // d'un moment de défilement, la grande majorité des cartes déjà vues
-  // se résolvent instantanément sans requête réseau, ce qui évite le
-  // "cadre blanc" observé après une longue session de survol.
+  // résultat ({small, large}) est mis en cache en mémoire puis dans
+  // IndexedDB : au bout d'un moment de défilement, la grande majorité des
+  // cartes déjà vues se résolvent instantanément sans requête réseau, ce
+  // qui évite le "cadre blanc" observé après une longue session de survol.
+  // On récupère à la fois "small" (léger, affiché en premier pour un
+  // rendu quasi instantané) et "large" (qualité finale, chargée en
+  // arrière-plan puis substituée une fois prête).
   async function resolveScryfallImageUrl(name) {
     if (imageUrlMemCache.has(name)) return imageUrlMemCache.get(name);
 
     const cached = await idbGet(STORE_IMAGES, name);
-    if (cached && cached.url && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
-      imageUrlMemCache.set(name, cached.url);
-      return cached.url;
+    if (cached && (cached.small || cached.url) && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
+      // Compat avec les anciennes entrées de cache (avant l'ajout du
+      // couple small/large) qui ne stockaient qu'un champ "url".
+      const urls = { small: cached.small || cached.url, large: cached.large || cached.url };
+      imageUrlMemCache.set(name, urls);
+      return urls;
     }
 
     try {
@@ -1335,71 +1354,32 @@
       if (!res.ok) return null;
       const json = await res.json();
       const faceImages = json.image_uris || (json.card_faces && json.card_faces[0] && json.card_faces[0].image_uris);
-      const imgUrl = faceImages && (faceImages.large || faceImages.normal || faceImages.png);
-      if (!imgUrl) return null;
-      imageUrlMemCache.set(name, imgUrl);
-      idbSet(STORE_IMAGES, { name, url: imgUrl, fetchedAt: Date.now() });
-      return imgUrl;
+      if (!faceImages) return null;
+      const large = faceImages.large || faceImages.normal || faceImages.png;
+      const small = faceImages.small || large;
+      if (!large && !small) return null;
+      const urls = { small, large: large || small };
+      imageUrlMemCache.set(name, urls);
+      idbSet(STORE_IMAGES, { name, small: urls.small, large: urls.large, fetchedAt: Date.now() });
+      return urls;
     } catch (err) {
       return null;
     }
   }
 
-  const IMAGE_WARMUP_BATCH_SIZE = 75; // maximum autorisé par l'API Scryfall /cards/collection
-  const IMAGE_WARMUP_CONCURRENCY = 3;
+  const IMAGE_PREWARM_CONCURRENCY = 4; // discret : ne doit pas concurrencer les requêtes prioritaires (cartes/commandants)
 
-  // Préchauffe le cache d'images en résolvant beaucoup de cartes d'un coup
-  // via l'API "collection" de Scryfall (jusqu'à 75 cartes par requête, au
-  // lieu d'une recherche floue par carte). Lancé en tâche de fond juste
-  // après l'analyse principale : par défaut la résolution reste paresseuse
-  // (au survol), mais comme la quasi-totalité des cartes affichées dans les
-  // résultats appartiennent à la collection qu'on vient d'analyser, les
-  // précharger pendant que l'utilisateur lit les résultats fait disparaître
-  // le petit délai de résolution au premier survol de chaque carte.
-  async function warmUpImageCache(names) {
+  // Pré-résout en arrière-plan (faible concurrence, non bloquant) les
+  // images des cartes fournies. Appelé juste après l'analyse principale
+  // avec les noms de la collection importée : ce sont précisément les
+  // cartes qui apparaîtront dans les listes de résultats (matches de
+  // commandants, cartes non trouvées), donc les plus susceptibles d'être
+  // survolées ensuite. Au moment du survol, resolveScryfallImageUrl
+  // trouve déjà l'entrée en cache mémoire/IndexedDB : plus de requête
+  // réseau visible, l'aperçu s'affiche immédiatement.
+  async function prewarmImageCache(names) {
     const uniqueNames = Array.from(new Set(names));
-    const toFetch = [];
-    for (const name of uniqueNames) {
-      if (imageUrlMemCache.has(name)) continue;
-      const cached = await idbGet(STORE_IMAGES, name);
-      if (cached && cached.url && Date.now() - cached.fetchedAt < IMAGE_URL_MAX_AGE_MS) {
-        imageUrlMemCache.set(name, cached.url);
-      } else {
-        toFetch.push(name);
-      }
-    }
-    if (toFetch.length === 0) return;
-
-    const batches = [];
-    for (let i = 0; i < toFetch.length; i += IMAGE_WARMUP_BATCH_SIZE) {
-      batches.push(toFetch.slice(i, i + IMAGE_WARMUP_BATCH_SIZE));
-    }
-
-    await runPool(
-      batches,
-      async (batch) => {
-        try {
-          const res = await fetchWithTimeout("https://api.scryfall.com/cards/collection", 15000, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ identifiers: batch.map((name) => ({ name })) }),
-          });
-          if (!res.ok) return;
-          const json = await res.json();
-          for (const card of json.data || []) {
-            const faceImages = card.image_uris || (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris);
-            const imgUrl = faceImages && (faceImages.large || faceImages.normal || faceImages.png);
-            if (!imgUrl || !card.name) continue;
-            imageUrlMemCache.set(card.name, imgUrl);
-            idbSet(STORE_IMAGES, { name: card.name, url: imgUrl, fetchedAt: Date.now() });
-          }
-        } catch (err) {
-          /* échec silencieux : le survol retombera sur la résolution à la demande */
-        }
-      },
-      IMAGE_WARMUP_CONCURRENCY,
-      null
-    );
+    await runPool(uniqueNames, (name) => resolveScryfallImageUrl(name), IMAGE_PREWARM_CONCURRENCY);
   }
 
   cardPreviewImg.addEventListener("load", () => {
@@ -1436,20 +1416,37 @@
     cardPreviewImg.alt = name;
     currentPreviewUrl = url;
 
+    // Si la carte est déjà résolue (cache mémoire, typiquement pré-chauffé
+    // en arrière-plan via prewarmImageCache), on saute le débounce :
+    // aucune requête réseau à protéger, autant afficher tout de suite.
+    const delay = imageUrlMemCache.has(name) ? 0 : 90;
+
     // Léger débounce avant de lancer la requête réseau : protège aussi
     // bien un survol rapide sur toute une liste qu'un clic répété sur les
     // flèches de navigation de l'aperçu (même carte affichée plusieurs
     // fois par seconde sinon).
     previewLoadTimer = setTimeout(() => {
-      resolveScryfallImageUrl(name).then((imgUrl) => {
+      resolveScryfallImageUrl(name).then((urls) => {
         if (token !== previewToken) return; // une autre carte a été affichée entre-temps
-        if (!imgUrl) {
+        if (!urls) {
           cardPreviewFrame.classList.add("loaded"); // pas d'image trouvée, on arrête le spinner
           return;
         }
-        cardPreviewImg.src = imgUrl;
+        // Affichage progressif : la vignette "small" (légère) apparaît en
+        // premier pour un rendu quasi instantané, puis on la remplace par
+        // "large" une fois celle-ci chargée en arrière-plan — sans jamais
+        // faire attendre l'utilisateur devant un cadre vide.
+        cardPreviewImg.src = urls.small;
+        if (urls.large && urls.large !== urls.small) {
+          const hiRes = new Image();
+          hiRes.onload = () => {
+            if (token !== previewToken) return; // carte changée entre-temps
+            cardPreviewImg.src = urls.large;
+          };
+          hiRes.src = urls.large;
+        }
       });
-    }, 90);
+    }, delay);
   }
 
   function updatePreviewNavUI() {
