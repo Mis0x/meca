@@ -297,6 +297,19 @@
     font-size: 11px;
     color: var(--danger);
   }
+  .notfound-blocked-tag {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--accent-light);
+    border: 1px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    cursor: help;
+  }
 
   /* ---------- DROPZONE ---------- */
   .dropzone {

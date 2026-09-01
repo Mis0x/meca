@@ -17,7 +17,26 @@
   const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
   const FETCH_CONCURRENCY = 12; // requêtes cartes en parallèle pendant l'analyse principale
   const REFINE_CONCURRENCY = 6; // requêtes commandants en parallèle pour le top N
-  const MAX_RETRIES = 2; // nouvelles tentatives sur échec réseau transitoire
+  const SECOND_PASS_CONCURRENCY = 3; // repêchage des cartes "bloquées" en fin d'analyse : lent et prudent
+  const MAX_RETRIES = 2; // nouvelles tentatives sur échec réseau/blocage transitoire (jamais sur une vraie absence)
+
+  // Coupe-circuit anti-blocage : si une part trop importante des dernières
+  // requêtes ressemble à un blocage (WAF/anti-bot, 429...) plutôt qu'à de
+  // vraies absences de carte, on réduit la concurrence et on marque une
+  // pause avant de reprendre. Continuer à cogner à pleine vitesse pendant
+  // un blocage ne fait que le prolonger, sans obtenir la moindre donnée.
+  const BREAKER_WINDOW = 20;
+  const BREAKER_BLOCK_RATIO = 0.3;
+  const BREAKER_MIN_SAMPLE = 8;
+  const BREAKER_COOLDOWN_MS = 8000;
+  const BREAKER_THROTTLE_FACTOR = 0.34;
+  const BREAKER_RECOVERY_STREAK = 15;
+
+  // Écriture différée dans IndexedDB : regroupe les mises en cache par lots
+  // au lieu d'une transaction par carte (jusqu'à plusieurs milliers sur une
+  // grosse collection), qui ajoutait un aller-retour navigateur/DB par item.
+  const CARD_WRITE_BATCH_SIZE = 40;
+  const CARD_WRITE_FLUSH_DELAY_MS = 250;
 
   const EDHREC_BASE = "https://json.edhrec.com";
   const COPY_ICON = '<svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="7" y="7" width="10" height="10" rx="1.4"/><path d="M4.5 13.2H3.8A1.3 1.3 0 0 1 2.5 11.9V3.8A1.3 1.3 0 0 1 3.8 2.5h8.1a1.3 1.3 0 0 1 1.3 1.3v.7"/></svg>';
@@ -164,6 +183,49 @@
     });
   }
 
+  function idbGetAll(store) {
+    return new Promise((resolve) => {
+      if (!db) return resolve([]);
+      const tx = db.transaction(store, "readonly");
+      const req = tx.objectStore(store).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+  }
+
+  // File d'écriture différée pour STORE_CARDS : voir CARD_WRITE_BATCH_SIZE.
+  let cardWriteQueue = [];
+  let cardWriteFlushTimer = null;
+
+  function queueCardWrite(record) {
+    cardWriteQueue.push(record);
+    if (cardWriteQueue.length >= CARD_WRITE_BATCH_SIZE) {
+      flushCardWrites();
+    } else if (!cardWriteFlushTimer) {
+      cardWriteFlushTimer = setTimeout(flushCardWrites, CARD_WRITE_FLUSH_DELAY_MS);
+    }
+  }
+
+  function flushCardWrites() {
+    if (cardWriteFlushTimer) {
+      clearTimeout(cardWriteFlushTimer);
+      cardWriteFlushTimer = null;
+    }
+    if (cardWriteQueue.length === 0 || !db) return;
+    const batch = cardWriteQueue;
+    cardWriteQueue = [];
+    try {
+      const tx = db.transaction(STORE_CARDS, "readwrite");
+      const store = tx.objectStore(STORE_CARDS);
+      for (const rec of batch) store.put(rec);
+    } catch (e) {
+      /* la transaction échoue rarement (DB fermée, quota...) : les entrées
+         concernées seront simplement re-fetchées la prochaine fois */
+    }
+  }
+
+  window.addEventListener("beforeunload", flushCardWrites);
+
   function idbCount(store) {
     return new Promise((resolve) => {
       if (!db) return resolve(0);
@@ -307,6 +369,78 @@
     }
   }
 
+  // -----------------------------------------------------------------------
+  // Coupe-circuit anti-blocage (voir constantes BREAKER_*)
+  // -----------------------------------------------------------------------
+  const circuitBreaker = (function () {
+    let ring = []; // true = issue "bloquée", false = succès
+    let cooldownUntil = 0;
+    let throttled = false;
+    let recoveryStreak = 0;
+
+    function push(blocked) {
+      ring.push(blocked);
+      if (ring.length > BREAKER_WINDOW) ring.shift();
+    }
+
+    return {
+      recordSuccess() {
+        push(false);
+        if (throttled) {
+          recoveryStreak++;
+          if (recoveryStreak >= BREAKER_RECOVERY_STREAK) {
+            throttled = false;
+            recoveryStreak = 0;
+          }
+        }
+      },
+      recordBlocked() {
+        push(true);
+        recoveryStreak = 0;
+        if (ring.length >= BREAKER_MIN_SAMPLE) {
+          const ratio = ring.filter(Boolean).length / ring.length;
+          if (ratio >= BREAKER_BLOCK_RATIO) {
+            throttled = true;
+            cooldownUntil = Date.now() + BREAKER_COOLDOWN_MS;
+            ring = [];
+          }
+        }
+      },
+      getThrottleFactor() {
+        return throttled ? BREAKER_THROTTLE_FACTOR : 1;
+      },
+      isThrottled() {
+        return throttled;
+      },
+      async waitIfCoolingDown() {
+        const remaining = cooldownUntil - Date.now();
+        if (remaining > 0) await sleep(remaining);
+      },
+      reset() {
+        ring = [];
+        cooldownUntil = 0;
+        throttled = false;
+        recoveryStreak = 0;
+      },
+    };
+  })();
+
+  // Le JSON statique d'EDHREC est hébergé façon S3/CloudFront sans
+  // permission ListBucket : une carte qui n'a pas de page (jetons,
+  // émblèmes, produits scellés...) renvoie donc un 403 "AccessDenied" au
+  // lieu d'un 404 — c'est le comportement standard de ce type
+  // d'hébergement pour une clé absente, pas un blocage. On ne le
+  // distingue d'un vrai blocage (WAF/anti-bot) que par la forme de la
+  // réponse : une page de blocage est quasi toujours du HTML et
+  // nettement plus volumineuse qu'une erreur XML/JSON minimaliste.
+  function classify403(res) {
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    const contentLength = parseInt(res.headers.get("content-length") || "-1", 10);
+    if (contentType.includes("html")) return "blocked";
+    if (contentLength > 2000) return "blocked";
+    return "absent";
+  }
+
   async function resolveEdhrecSlugViaScryfall(name) {
     try {
       const url = "https://api.scryfall.com/cards/named?fuzzy=" + encodeURIComponent(name);
@@ -325,18 +459,72 @@
   async function fetchCardPageRaw(slug) {
     const url = EDHREC_BASE + "/pages/cards/" + encodeURIComponent(slug) + ".json";
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      let res;
       try {
-        const res = await fetchWithTimeout(url);
-        if (res.status === 404) return { data: null, notFound: true };
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        const json = await res.json();
-        return { data: json, notFound: false };
+        res = await fetchWithTimeout(url);
       } catch (err) {
+        // Erreur réseau réelle (timeout, coupure...) : transitoire.
+        circuitBreaker.recordBlocked();
         if (attempt < MAX_RETRIES) {
           await sleep(300 * (attempt + 1));
           continue;
         }
-        return { data: null, notFound: false, error: String(err) };
+        return { data: null, notFound: false, blocked: true, error: String(err) };
+      }
+
+      if (res.status === 404) {
+        circuitBreaker.recordSuccess(); // le serveur répond normalement, la carte n'existe juste pas
+        return { data: null, notFound: true };
+      }
+
+      if (res.status === 403) {
+        if (classify403(res) === "absent") {
+          // Vraie absence (voir commentaire de classify403) : jamais retenté,
+          // pas la peine — c'est ce qui, avant, faisait retenter chaque
+          // jeton/emblème 3 fois pour rien.
+          circuitBreaker.recordSuccess();
+          return { data: null, notFound: true };
+        }
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) {
+          await sleep(300 * (attempt + 1));
+          continue;
+        }
+        return { data: null, notFound: false, blocked: true };
+      }
+
+      if (res.status === 429) {
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) {
+          const retryAfter = parseFloat(res.headers.get("retry-after"));
+          await sleep(!isNaN(retryAfter) ? retryAfter * 1000 : 500 * (attempt + 1));
+          continue;
+        }
+        return { data: null, notFound: false, blocked: true };
+      }
+
+      if (!res.ok) {
+        // 5xx et autres : transitoire.
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) {
+          await sleep(300 * (attempt + 1));
+          continue;
+        }
+        return { data: null, notFound: false, blocked: true, error: "HTTP " + res.status };
+      }
+
+      try {
+        const json = await res.json();
+        circuitBreaker.recordSuccess();
+        return { data: json, notFound: false };
+      } catch (err) {
+        // Réponse 200 mais corps illisible : transitoire, on retente.
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) {
+          await sleep(300 * (attempt + 1));
+          continue;
+        }
+        return { data: null, notFound: false, blocked: true, error: String(err) };
       }
     }
   }
@@ -349,8 +537,10 @@
   // trouvée pendant l'analyse en masse (jetons, émblèmes, produits scellés
   // qui ne seront de toute façon jamais indexés) multiplierait les
   // requêtes réseau et ralentirait l'analyse de collections volumineuses.
-  async function fetchCardPage(slug, cardName, useScryfallFallback) {
-    const cached = await idbGet(STORE_CARDS, slug);
+  // cacheMap (optionnel) : Map slug -> enregistrement, préchargée en une
+  // fois via idbGetAll() au lieu d'une transaction IndexedDB par carte.
+  async function fetchCardPage(slug, cardName, useScryfallFallback, cacheMap) {
+    const cached = cacheMap ? cacheMap.get(slug) : await idbGet(STORE_CARDS, slug);
     if (cached && Date.now() - cached.fetchedAt < CACHE_MAX_AGE_MS) {
       return { data: cached.data, fromCache: true, notFound: cached.notFound || false };
     }
@@ -360,14 +550,27 @@
     if (!candidates.includes(slug)) candidates.unshift(slug);
 
     let lastResult = { data: null, notFound: true };
+    let anyBlocked = false;
     for (const candidate of candidates) {
       if (tried.has(candidate)) continue;
       tried.add(candidate);
       lastResult = await fetchCardPageRaw(candidate);
       if (lastResult.data) {
-        await idbSet(STORE_CARDS, { slug, data: lastResult.data, notFound: false, fetchedAt: Date.now() });
+        const record = { slug, data: lastResult.data, notFound: false, fetchedAt: Date.now() };
+        queueCardWrite(record);
+        if (cacheMap) cacheMap.set(slug, record);
         return { data: lastResult.data, fromCache: false, notFound: false };
       }
+      if (lastResult.blocked) anyBlocked = true;
+    }
+
+    if (anyBlocked) {
+      // Probable blocage transitoire (WAF/anti-bot, 429, coupure réseau...) :
+      // on NE met PAS ce résultat en cache. Le mettre en cache comme
+      // "introuvable" pendant 30 jours marquerait à tort une vraie carte
+      // comme absente d'EDHREC. Elle sera retentée automatiquement en fin
+      // d'analyse (second passage), ou via "Tout retenter".
+      return { data: null, fromCache: false, notFound: false, blocked: true };
     }
 
     if (useScryfallFallback && cardName) {
@@ -375,13 +578,22 @@
       if (altSlug && !tried.has(altSlug)) {
         const alt = await fetchCardPageRaw(altSlug);
         if (alt.data) {
-          await idbSet(STORE_CARDS, { slug, data: alt.data, notFound: false, fetchedAt: Date.now(), viaScryfall: true });
+          const record = { slug, data: alt.data, notFound: false, fetchedAt: Date.now(), viaScryfall: true };
+          queueCardWrite(record);
+          if (cacheMap) cacheMap.set(slug, record);
           return { data: alt.data, fromCache: false, notFound: false, viaScryfall: true };
+        }
+        if (alt.blocked) {
+          return { data: null, fromCache: false, notFound: false, blocked: true };
         }
       }
     }
 
-    await idbSet(STORE_CARDS, { slug, data: null, notFound: true, fetchedAt: Date.now() });
+    // Vraie absence, confirmée (404, ou 403 "clé inexistante" identifié par
+    // classify403) : celle-ci peut être mise en cache durablement.
+    const record = { slug, data: null, notFound: true, fetchedAt: Date.now() };
+    queueCardWrite(record);
+    if (cacheMap) cacheMap.set(slug, record);
     return { data: null, fromCache: false, notFound: true, error: lastResult.error };
   }
 
@@ -392,30 +604,66 @@
     }
     const url = EDHREC_BASE + "/pages/commanders/" + encodeURIComponent(slug) + ".json";
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      let res;
       try {
-        const res = await fetchWithTimeout(url);
-        if (!res.ok) return null;
+        res = await fetchWithTimeout(url);
+      } catch (err) {
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) { await sleep(300 * (attempt + 1)); continue; }
+        return null;
+      }
+
+      if (res.status === 403 && classify403(res) === "absent") {
+        circuitBreaker.recordSuccess();
+        return null;
+      }
+
+      if (!res.ok) {
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) { await sleep(300 * (attempt + 1)); continue; }
+        return null; // on n'écrit jamais "introuvable" en cache pour un commandant potentiellement bloqué
+      }
+
+      try {
         const json = await res.json();
+        circuitBreaker.recordSuccess();
         await idbSet(STORE_COMMANDERS, { slug, data: json, fetchedAt: Date.now() });
         return json;
       } catch (err) {
-        if (attempt < MAX_RETRIES) {
-          await sleep(300 * (attempt + 1));
-          continue;
-        }
+        circuitBreaker.recordBlocked();
+        if (attempt < MAX_RETRIES) { await sleep(300 * (attempt + 1)); continue; }
         return null;
       }
     }
   }
 
-  async function runPool(items, worker, concurrency, onProgress) {
+  // breaker (optionnel) : un circuitBreaker (voir plus haut). Quand fourni,
+  // le nombre de workers actifs simultanés peut être réduit dynamiquement
+  // (breaker.getThrottleFactor()) et de nouveaux workers attendent la fin
+  // du cooldown avant de démarrer — au lieu de continuer à taper à pleine
+  // concurrence pendant un blocage détecté, ce qui ne ferait que le
+  // prolonger sans obtenir la moindre donnée en retour.
+  function runPool(items, worker, concurrency, onProgress, breaker) {
     let idx = 0;
     let done = 0;
+    let active = 0;
     const results = new Array(items.length);
 
-    async function next() {
-      while (idx < items.length) {
-        const my = idx++;
+    return new Promise((resolve) => {
+      function maybeStart() {
+        const limit = breaker
+          ? Math.max(1, Math.min(concurrency, Math.floor(concurrency * breaker.getThrottleFactor())))
+          : concurrency;
+        while (active < limit && idx < items.length) {
+          const my = idx++;
+          active++;
+          runOne(my);
+        }
+        if (idx >= items.length && active === 0) resolve(results);
+      }
+
+      async function runOne(my) {
+        if (breaker) await breaker.waitIfCoolingDown();
         try {
           results[my] = await worker(items[my], my);
         } catch (err) {
@@ -424,13 +672,13 @@
           results[my] = { error: String(err) };
         }
         done++;
+        active--;
         if (onProgress) onProgress(done, items.length, items[my]);
+        maybeStart();
       }
-    }
 
-    const workers = Array.from({ length: Math.min(concurrency, items.length) }, next);
-    await Promise.all(workers);
-    return results;
+      maybeStart();
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -599,7 +847,7 @@
       if (metaEl) {
         metaEl.innerHTML = buildMetaHtml(entry);
       }
-    }, REFINE_CONCURRENCY, null);
+    }, REFINE_CONCURRENCY, null, circuitBreaker);
   }
 
   function cssEscape(s) {
@@ -832,6 +1080,7 @@
         (it, idx) => `
         <li data-slug="${escapeHtml(it.slug)}">
           <a class="card-hover-link" href="${scryfallSearchUrl(it.name)}" target="_blank" rel="noopener" data-card="${escapeHtml(it.name)}" data-notfound-index="${idx}">${escapeHtml(it.name)}</a>
+          ${it.blocked ? `<span class="notfound-blocked-tag" title="${t("notfound.blockedTagTitle")}">${t("notfound.blockedTag")}</span>` : ""}
           <button class="retry-card-btn" type="button" title="${t("retry.title")}" aria-label="${t("retry.title")}"><span class="retry-icon">↻</span></button>
           <span class="retry-status"></span>
         </li>`
@@ -851,7 +1100,7 @@
     status.textContent = "";
 
     await idbDelete(STORE_CARDS, slug);
-    const { data, notFound } = await fetchCardPage(slug, name, true);
+    const { data, notFound, blocked } = await fetchCardPage(slug, name, true);
 
     btn.classList.remove("spinning");
     btn.blur();
@@ -868,7 +1117,7 @@
       renderResults();
     } else {
       btn.disabled = false;
-      status.textContent = t("retry.stillNotFound");
+      status.textContent = blocked ? t("retry.stillBlocked") : t("retry.stillNotFound");
     }
   }
 
@@ -888,6 +1137,7 @@
     const originalLabel = els.retryAllBtn.textContent;
     els.retryAllBtn.disabled = true;
 
+    circuitBreaker.reset();
     const results = await runPool(
       items,
       async (item) => {
@@ -897,7 +1147,8 @@
       RETRY_ALL_CONCURRENCY,
       (done, total) => {
         els.retryAllBtn.textContent = t("retry.allProgress", { done, total });
-      }
+      },
+      circuitBreaker
     );
 
     const stillNotFound = [];
@@ -909,7 +1160,7 @@
       if (ok) {
         if (fetchIdx !== undefined) lastFetchResults[fetchIdx].data = r.data;
       } else {
-        stillNotFound.push(item);
+        stillNotFound.push({ name: item.name, slug: item.slug, blocked: !!(r && r.blocked) });
       }
     });
 
@@ -1014,30 +1265,48 @@
     let fromCache = 0;
     let found = 0;
     const notFoundItems = [];
+    const blockedItems = [];
     const seenCommanders = new Set();
     const ownedCommanderSlugs = new Set();
 
+    // Un seul chargement de tout le cache en mémoire plutôt qu'une
+    // transaction IndexedDB par carte (jusqu'à plusieurs milliers sinon).
+    const cardCache = new Map((await idbGetAll(STORE_CARDS)).map((r) => [r.slug, r]));
+    circuitBreaker.reset();
+
     progressStateKey = "progress.fetching"; els.progressLabel.textContent = t("progress.fetching");
+
+    // Compte une carte trouvée dans les stats et les commandants candidats.
+    // Partagé entre le passage principal et le second passage (blocages).
+    function recordFound(item, data) {
+      found++;
+      // Source de vérité : le champ "legal_commander" fourni par EDHREC sur
+      // la carte elle-même (couvre les créatures légendaires, mais aussi les
+      // planeswalkers-commandants type Daretti, etc.) — pas une inférence
+      // par co-occurrence avec d'autres cartes.
+      if (extractLegalCommander(data)) ownedCommanderSlugs.add(item.slug);
+      for (const cv of extractCommanderLists(data)) {
+        if (cv.potential_decks >= minSample) {
+          seenCommanders.add(cv.sanitized || cv.slug || cv.name);
+        }
+      }
+    }
 
     const results = await runPool(
       items,
       async (item) => {
-        const { data, fromCache: fc, notFound } = await fetchCardPage(item.slug, item.name);
+        const { data, fromCache: fc, notFound, blocked } = await fetchCardPage(item.slug, item.name, false, cardCache);
         if (fc) fromCache++;
         if (data && !notFound) {
-          found++;
-          // Source de vérité : le champ "legal_commander" fourni par EDHREC
-          // sur la carte elle-même (couvre les créatures légendaires, mais
-          // aussi les planeswalkers-commandants type Daretti, etc.) — pas une
-          // inférence par co-occurrence avec d'autres cartes.
-          if (extractLegalCommander(data)) ownedCommanderSlugs.add(item.slug);
-          for (const cv of extractCommanderLists(data)) {
-            if (cv.potential_decks >= minSample) {
-              seenCommanders.add(cv.sanitized || cv.slug || cv.name);
-            }
-          }
+          recordFound(item, data);
+        } else if (blocked) {
+          // Probablement transitoire (blocage réseau/anti-bot) : mise de
+          // côté pour un second passage plus lent en fin d'analyse, pas
+          // comptée comme "non trouvée" tant qu'on n'a pas confirmé que ce
+          // n'en est pas une.
+          blockedItems.push({ name: item.name, slug: item.slug });
         } else {
-          notFoundItems.push({ name: item.name, slug: item.slug });
+          notFoundItems.push({ name: item.name, slug: item.slug, blocked: false });
         }
         return { slug: item.slug, name: item.name, qty: item.qty, data };
       },
@@ -1052,8 +1321,50 @@
         els.statCommanders.textContent = seenCommanders.size;
         els.statOwnedCommanders.textContent = ownedCommanderSlugs.size;
         els.statNotFound.textContent = notFoundItems.length;
-      }
+      },
+      circuitBreaker
     );
+
+    flushCardWrites();
+
+    // Second passage, volontairement lent et prudent, uniquement sur les
+    // cartes mises de côté pour blocage probable pendant le passage
+    // principal — pas la peine de retenter 5000 cartes, seulement celles
+    // qui n'ont pas eu de réponse propre (trouvée ou vraiment absente).
+    if (blockedItems.length > 0) {
+      progressStateKey = "progress.retryingBlocked";
+      els.progressLabel.textContent = t("progress.retryingBlocked", { n: blockedItems.length });
+      logLine(t("log.retryingBlocked", { n: blockedItems.length }));
+      circuitBreaker.reset();
+
+      const resultIndexBySlug = new Map(results.map((r, i) => [r.slug, i]));
+      await runPool(
+        blockedItems,
+        async (item) => {
+          const { data, notFound, blocked } = await fetchCardPage(item.slug, item.name, false, cardCache);
+          if (data && !notFound) {
+            recordFound(item, data);
+            const idx = resultIndexBySlug.get(item.slug);
+            if (idx !== undefined) results[idx].data = data;
+          } else if (blocked) {
+            // Toujours bloquée après le second passage : affichée comme non
+            // trouvée mais marquée "bloquée", sans jamais être mise en
+            // cache — "Tout retenter" la reprendra fraîchement plus tard.
+            notFoundItems.push({ name: item.name, slug: item.slug, blocked: true });
+          } else {
+            notFoundItems.push({ name: item.name, slug: item.slug, blocked: false });
+          }
+        },
+        SECOND_PASS_CONCURRENCY,
+        (done, total) => {
+          els.progressLabel.textContent = t("progress.retryingBlocked", { n: total }) + " " + done + "/" + total;
+          els.statFound.textContent = found;
+          els.statNotFound.textContent = notFoundItems.length;
+        },
+        circuitBreaker
+      );
+      flushCardWrites();
+    }
 
     lastFetchResults = results;
     lastMinSample = minSample;
@@ -1206,7 +1517,8 @@
         }
       },
       RANK_FETCH_CONCURRENCY,
-      onProgress
+      onProgress,
+      circuitBreaker
     );
   }
 
