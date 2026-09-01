@@ -86,6 +86,7 @@
   let lastNotFoundItems = [];
   let currentFileLabel = null; // { fileName, count, restored }
   let lastSessionInfo = null; // { fileName, count }
+  let analysisTimerInterval = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -103,6 +104,7 @@
     progressPanel: $("progressPanel"),
     progressLabel: $("progressLabel"),
     progressCount: $("progressCount"),
+    progressTimer: $("progressTimer"),
     progressFill: $("progressFill"),
     progressLog: $("progressLog"),
     statsStrip: $("statsStrip"),
@@ -111,6 +113,7 @@
     statCommanders: $("statCommanders"),
     statOwnedCommanders: $("statOwnedCommanders"),
     statCache: $("statCache"),
+    statDuration: $("statDuration"),
     statNotFound: $("statNotFound"),
     notFoundPanel: $("notFoundPanel"),
     notFoundSummary: $("notFoundSummary"),
@@ -355,6 +358,14 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function formatDuration(ms) {
+    const totalSec = ms / 1000;
+    if (totalSec < 60) return totalSec.toFixed(1) + "s";
+    const m = Math.floor(totalSec / 60);
+    const s = Math.round(totalSec % 60);
+    return m + "m " + (s < 10 ? "0" : "") + s + "s";
+  }
+
   // Toute requête réseau passe par ici : évite qu'une requête bloquée
   // (Scryfall lent, Wi-Fi capricieux…) ne fasse tourner un spinner à
   // l'infini ou ne bloque un worker de l'analyse en masse.
@@ -433,13 +444,16 @@
   // distingue d'un vrai blocage (WAF/anti-bot) que par la forme de la
   // réponse : une page de blocage est quasi toujours du HTML et
   // nettement plus volumineuse qu'une erreur XML/JSON minimaliste.
-  function classify403(res) {
-    const contentType = (res.headers.get("content-type") || "").toLowerCase();
-    const contentLength = parseInt(res.headers.get("content-length") || "-1", 10);
-    if (contentType.includes("html")) return "blocked";
-    if (contentLength > 2000) return "blocked";
-    return "absent";
-  }
+  // Sur l'hébergement statique d'EDHREC, un 403 sur une carte signifie une
+  // vraie absence (jetons, émblèmes, produits scellés, cartes non
+  // indexées...), au même titre qu'un 404 — confirmé en usage réel : la
+  // quasi-totalité des 403 observés sur de grosses collections sont des
+  // absences légitimes, pas des blocages. Tenter de deviner un blocage à
+  // partir du corps/content-type de la réponse s'est avéré peu fiable (la
+  // page d'erreur par défaut de ce type d'hébergement peut être du HTML
+  // même pour une simple absence) et provoquait des faux positifs en
+  // cascade sur le coupe-circuit. Les seuls signaux de blocage retenus
+  // sont donc sans ambiguïté : 429, 5xx, et échecs réseau/timeout.
 
   async function resolveEdhrecSlugViaScryfall(name) {
     try {
@@ -472,25 +486,9 @@
         return { data: null, notFound: false, blocked: true, error: String(err) };
       }
 
-      if (res.status === 404) {
+      if (res.status === 404 || res.status === 403) {
         circuitBreaker.recordSuccess(); // le serveur répond normalement, la carte n'existe juste pas
         return { data: null, notFound: true };
-      }
-
-      if (res.status === 403) {
-        if (classify403(res) === "absent") {
-          // Vraie absence (voir commentaire de classify403) : jamais retenté,
-          // pas la peine — c'est ce qui, avant, faisait retenter chaque
-          // jeton/emblème 3 fois pour rien.
-          circuitBreaker.recordSuccess();
-          return { data: null, notFound: true };
-        }
-        circuitBreaker.recordBlocked();
-        if (attempt < MAX_RETRIES) {
-          await sleep(300 * (attempt + 1));
-          continue;
-        }
-        return { data: null, notFound: false, blocked: true };
       }
 
       if (res.status === 429) {
@@ -589,8 +587,9 @@
       }
     }
 
-    // Vraie absence, confirmée (404, ou 403 "clé inexistante" identifié par
-    // classify403) : celle-ci peut être mise en cache durablement.
+    // Vraie absence, confirmée (404 ou 403, tous deux traités comme
+    // équivalents sur cet hébergement) : celle-ci peut être mise en cache
+    // durablement.
     const record = { slug, data: null, notFound: true, fetchedAt: Date.now() };
     queueCardWrite(record);
     if (cacheMap) cacheMap.set(slug, record);
@@ -613,7 +612,7 @@
         return null;
       }
 
-      if (res.status === 403 && classify403(res) === "absent") {
+      if (res.status === 403 || res.status === 404) {
         circuitBreaker.recordSuccess();
         return null;
       }
@@ -1261,7 +1260,16 @@
     els.statsStrip.classList.add("show");
     els.progressLog.innerHTML = "";
 
+    const analysisStartedAt = performance.now();
+    if (analysisTimerInterval) clearInterval(analysisTimerInterval);
+    els.progressTimer.textContent = formatDuration(0);
+    els.statDuration.textContent = "—";
+    analysisTimerInterval = setInterval(() => {
+      els.progressTimer.textContent = formatDuration(performance.now() - analysisStartedAt);
+    }, 200);
+
     const items = Array.from(collection.values());
+    try {
     let fromCache = 0;
     let found = 0;
     const notFoundItems = [];
@@ -1378,6 +1386,12 @@
     progressStateKey = "progress.done"; els.progressLabel.textContent = t("progress.done");
     els.progressFill.style.width = "100%";
 
+    if (analysisTimerInterval) { clearInterval(analysisTimerInterval); analysisTimerInterval = null; }
+    const totalDuration = performance.now() - analysisStartedAt;
+    els.progressTimer.textContent = formatDuration(totalDuration);
+    els.statDuration.textContent = formatDuration(totalDuration);
+    logLine(t("log.analysisDuration", { time: formatDuration(totalDuration) }));
+
     renderNotFoundList(notFoundItems);
 
     els.resultsTitle.style.display = "block";
@@ -1396,6 +1410,9 @@
     for (const item of collection.values()) namesToWarm.add(item.name);
     for (const c of allCommanders) namesToWarm.add(c.name);
     warmUpImageCache(Array.from(namesToWarm));
+    } finally {
+      if (analysisTimerInterval) { clearInterval(analysisTimerInterval); analysisTimerInterval = null; }
+    }
   }
 
   // ---------------------------------------------------------------------
