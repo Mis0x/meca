@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>M.E.C.A — Moxfield x EDHREC Collection Analyser</title>
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem("moxedh_theme");
+      var light = saved ? saved === "light" : (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches && !window.matchMedia("(prefers-color-scheme: dark)").matches);
+      if (light) document.documentElement.setAttribute("data-theme", "light");
+    } catch (e) {}
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div class="masthead-brand">
+      <p class="masthead-title">M.E.C.A</p>
+      <p class="masthead-sub" id="mastheadSub"><span class="letter">M</span>oxfield x <span class="letter">E</span>DHREC, <span class="letter">C</span>ollection <span class="letter">A</span>nalyser</p>
+    </div>
+    <div class="masthead-controls">
+      <button class="lang-toggle" id="langToggle" type="button" aria-pressed="false" data-i18n-aria="lang.switchTo" aria-label="Switch to English" data-i18n-title="lang.switchTo" title="Switch to English">
+        <span class="lang-fr">FR</span><span class="lang-sep">/</span><span class="lang-en">EN</span>
+      </button>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false" data-i18n-aria="theme.toLight" aria-label="Thème clair" data-i18n-title="theme.toLight" title="Thème clair">
+        <span class="ttk-moon">☾</span>
+        <span class="ttk-track"><span class="ttk-knob"></span></span>
+        <span class="ttk-sun">☀</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <details class="help-panel">
+    <summary data-i18n="help.summary">Comment ça marche, et comment exporter mon CSV Moxfield</summary>
+    <div class="help-body">
+      <h4 data-i18n="help.exportTitle">Exporter ta collection depuis Moxfield</h4>
+      <ol>
+        <li data-i18n="help.exportStep1">Va sur <code>moxfield.com</code> et ouvre ta <strong>Collection</strong>.</li>
+        <li data-i18n="help.exportStep2">Clique sur le bouton <strong>Export</strong>.</li>
+        <li data-i18n="help.exportStep3">Choisis le format <strong>CSV</strong> et télécharge le fichier.</li>
+        <li data-i18n="help.exportStep4">Dépose ce fichier tel quel ci-dessous.</li>
+      </ol>
+
+      <h4 data-i18n="help.doTitle">Ce que fait l'outil</h4>
+      <p data-i18n="help.doP1">Pour chaque carte unique de ta collection, l'app va chercher sur EDHREC la liste des commandants qui la jouent le plus souvent, et compare ce taux au taux de jeu <em>moyen</em> de la carte tous commandants confondus. Ça donne un score de <strong>synergie (lift)</strong> : un multiplicateur, pas un pourcentage. Par exemple, une carte affichée « ×1000 » est jouée environ 1000 fois plus souvent avec ce commandant précis que sa moyenne sur EDHREC — signe d'une carte de niche presque exclusivement associée à lui. À l'inverse, un staple joué partout (Sol Ring, Command Tower…) obtient un score proche de zéro, peu importe le commandant, car son taux de jeu ne varie presque pas d'un commandant à l'autre.</p>
+      <p data-i18n="help.doP2">Ces multiplicateurs sont additionnés par commandant : le score total qui apparaît sur chaque fiche n'est donc ni un pourcentage ni une note sur 100, mais simplement la somme de tous ces « ×N » sur les cartes de ta collection liées à ce commandant. Il ne se compare qu'entre commandants de ta propre analyse : plus il est élevé, plus tu as de cartes de niche qui pointent statistiquement vers lui.</p>
+
+      <h4 data-i18n="help.notTitle">Ce que le résultat ne dit pas</h4>
+      <p data-i18n="help.notP1">L'app ne propose pas de decklist complète ni un % de complétion par rapport à une liste type — volontairement, pour ne pas te limiter aux cartes déjà populaires et te faire passer à côté de pépites plus confidentielles de ta collection. Le score de synergie indique où ta collection est déjà utile, pas une garantie que ces cartes forment ensemble un deck cohérent et jouable tel quel.</p>
+
+      <h4 data-i18n="help.privacyTitle">Confidentialité</h4>
+      <p data-i18n="help.privacyP1">Aucune donnée n'est envoyée à un serveur autre qu'EDHREC lui-même. Le fichier CSV est lu et analysé entièrement dans ton navigateur ; les résultats sont mis en cache localement (IndexedDB) pour accélérer les prochaines analyses.</p>
+    </div>
+  </details>
+
+  <h2 class="section-title" data-i18n="section.dropTitle">Déposer l'export Moxfield</h2>
+
+  <div class="dropzone" id="dropzone">
+    <input type="file" id="fileInput" accept=".csv" />
+    <div class="dropzone-label" data-i18n="dropzone.label">Glisse ton fichier .csv ici, ou clique pour le choisir</div>
+    <div class="dropzone-hint">MOXFIELD → COLLECTION → EXPORT → CSV</div>
+    <div class="file-chip" id="fileChip" style="display:none;"></div>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-field">
+      <label for="minSample" data-i18n="settings.minSample">Échantillon minimum de decks (EDHREC)</label>
+      <input type="number" id="minSample" value="120" min="0" style="max-width: 220px;" />
+      <p class="field-hint" data-i18n="settings.minSampleHint">Ignore les commandants trop peu joués sur EDHREC pour donner un score fiable — en dessous de ce nombre de decks recensés, la statistique est trop bruitée. Descends la valeur pour inclure des commandants plus confidentiels, ou monte-la pour ne garder que les plus établis.</p>
+    </div>
+  </div>
+
+  <div class="actions-row">
+    <button class="btn" id="startBtn" disabled data-i18n="btn.start">Lancer l'analyse</button>
+    <button class="btn secondary" id="restoreSessionBtn" style="display:none;" data-i18n="btn.restoreSession">Récupérer dernière session</button>
+    <button class="btn secondary" id="clearCacheBtn" style="display:none;" data-i18n="btn.clearCache">Vider le cache local</button>
+    <span class="error-note" id="setupError"></span>
+  </div>
+
+  <div class="progress-panel" id="progressPanel">
+    <div class="progress-top">
+      <span id="progressLabel" data-i18n="progress.idle">En attente…</span>
+      <span id="progressCount">0 / 0</span>
+      <span id="progressTimer" class="progress-timer">—</span>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-log" id="progressLog"></div>
+  </div>
+
+  <div class="stats-strip" id="statsStrip">
+    <div class="stat-box"><div class="stat-num" id="statCards">—</div><div class="stat-label" data-i18n="stat.cards">Cartes uniques</div></div>
+    <div class="stat-box"><div class="stat-num" id="statFound">—</div><div class="stat-label" data-i18n="stat.found">Trouvées sur EDHREC</div></div>
+    <div class="stat-box"><div class="stat-num" id="statCommanders">—</div><div class="stat-label" data-i18n="stat.commanders">Commandants candidats</div></div>
+    <div class="stat-box"><div class="stat-num" id="statOwnedCommanders">—</div><div class="stat-label" data-i18n="stat.ownedCommanders">Commandants déjà en collection</div></div>
+    <div class="stat-box"><div class="stat-num" id="statCache">—</div><div class="stat-label" data-i18n="stat.cache">Servies depuis le cache</div></div>
+    <div class="stat-box"><div class="stat-num" id="statDuration">—</div><div class="stat-label" data-i18n="stat.duration">Durée de l'analyse</div></div>
+    <div class="stat-box"><div class="stat-num" id="statNotFound">—</div><div class="stat-label" data-i18n="stat.notFound">Non trouvées sur EDHREC</div></div>
+  </div>
+
+  <details class="help-panel" id="notFoundPanel" style="display:none;">
+    <summary id="notFoundSummary" data-i18n="notfound.title">Cartes non trouvées sur EDHREC</summary>
+    <div class="help-body">
+      <p data-i18n="notfound.body">Ces cartes n'ont renvoyé aucune donnée EDHREC — jetons/emblèmes/produits scellés présents dans l'export, nom mal reconnu (accents ou caractères spéciaux), carte trop confidentielle pour être indexée, ou simple raté réseau ponctuel. Relance l'analyse pour écarter cette dernière hypothèse.</p>
+      <button type="button" class="btn secondary retry-all-btn" id="retryAllBtn" data-i18n="retry.all">Tout retenter</button>
+      <ul id="notFoundList"></ul>
+    </div>
+  </details>
+
+  <h2 class="section-title" id="resultsTitle" style="display:none;" data-i18n="results.title">Fiches commandants</h2>
+  <p class="section-note" id="resultsNote" style="display:none;" data-i18n="results.note">Classées par score de synergie : la somme, pour chaque commandant, du <em>lift</em> de tes cartes qui lui sont statistiquement associées — un multiplicateur (« ×N » = jouée N fois plus souvent avec ce commandant que sa moyenne), pas un pourcentage. Un score élevé = beaucoup de tes cartes de niche collent précisément à ce commandant — pas une comparaison avec une decklist type.</p>
+
+  <div class="filter-bar" id="filterBar">
+    <div class="filter-group">
+      <label for="sortSelect" data-i18n="filter.sort">Trier</label>
+      <select id="sortSelect">
+        <option value="score" data-i18n="sort.score">Score de synergie</option>
+        <option value="matches" data-i18n="sort.matches">Nombre de cartes associées</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label for="ownedFilter" data-i18n="filter.filter">Filtrer</label>
+      <select id="ownedFilter">
+        <option value="all" data-i18n="owned.all">Tous les commandants</option>
+        <option value="owned" data-i18n="owned.owned">Uniquement ceux que je possède déjà</option>
+        <option value="missing" data-i18n="owned.missing">Uniquement à acheter</option>
+      </select>
+    </div>
+    <div class="filter-group color-filter-group">
+      <label for="colorFilterMode" data-i18n="filter.colors">Identité couleur</label>
+      <div class="color-filter-controls">
+        <select id="colorFilterMode">
+          <option value="exact" data-i18n="color.modeExact">Identité exacte</option>
+          <option value="subset" data-i18n="color.modeSubset">Contient uniquement ces couleurs</option>
+          <option value="atleast" data-i18n="color.modeAtleast">Contient au moins ces couleurs</option>
+        </select>
+        <div class="color-filter" id="colorFilter">
+          <button type="button" class="color-toggle pip pip-W" data-color="W" aria-pressed="false" data-i18n-title="color.w" data-i18n-aria="color.w" title="Blanc" aria-label="Blanc"></button>
+          <button type="button" class="color-toggle pip pip-U" data-color="U" aria-pressed="false" data-i18n-title="color.u" data-i18n-aria="color.u" title="Bleu" aria-label="Bleu"></button>
+          <button type="button" class="color-toggle pip pip-B" data-color="B" aria-pressed="false" data-i18n-title="color.b" data-i18n-aria="color.b" title="Noir" aria-label="Noir"></button>
+          <button type="button" class="color-toggle pip pip-R" data-color="R" aria-pressed="false" data-i18n-title="color.r" data-i18n-aria="color.r" title="Rouge" aria-label="Rouge"></button>
+          <button type="button" class="color-toggle pip pip-G" data-color="G" aria-pressed="false" data-i18n-title="color.g" data-i18n-aria="color.g" title="Vert" aria-label="Vert"></button>
+          <button type="button" class="color-toggle pip pip-c" data-color="C" aria-pressed="false" data-i18n-title="pip.colorless" data-i18n-aria="pip.colorless" title="Incolore" aria-label="Incolore"></button>
+          <button type="button" class="color-filter-clear" id="colorFilterClear" data-i18n="color.clear" style="display:none;">Réinitialiser</button>
+        </div>
+      </div>
+    </div>
+    <div class="filter-group">
+      <label for="excludeTopN" data-i18n="settings.excludeTopN">Exclure le top N des plus populaires</label>
+      <input type="number" id="excludeTopN" value="0" min="0" />
+      <span class="field-hint" id="excludeTopNStatus" style="display:none;"></span>
+    </div>
+    <p class="field-hint color-filter-hint" data-i18n="settings.excludeTopNHint">Retire les commandants dont le rang EDHREC réel (toutes commandants confondus, pas seulement ceux de cette analyse) est inférieur ou égal à N — par exemple 1400 exclut tout ce qui est classé #1 à #1400 (0 = aucune exclusion). Le premier réglage télécharge le rang de chaque commandant concerné, ce qui peut prendre quelques secondes.</p>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<footer data-i18n="footer.text">
+  Outil personnel — les requêtes vers EDHREC partent directement de ton navigateur. Aucune donnée de collection n'est stockée ailleurs que dans ton navigateur (IndexedDB).
+</footer>
+
+<div id="cardPreviewBackdrop"></div>
+<div class="card-preview" id="cardPreview">
+  <div class="card-preview-frame" id="cardPreviewFrame">
+    <div class="card-preview-spinner"></div>
+    <img id="cardPreviewImg" src="" alt="" loading="lazy" decoding="async" />
+    <button class="cp-arrow cp-arrow-left" id="cpPrevBtn" type="button" data-i18n-aria="preview.prev" aria-label="Carte précédente">‹</button>
+    <button class="cp-arrow cp-arrow-right" id="cpNextBtn" type="button" data-i18n-aria="preview.next" aria-label="Carte suivante">›</button>
+  </div>
+  <div class="card-preview-meta" id="cardPreviewMeta"></div>
+  <div class="card-preview-hint" id="cardPreviewHint">Touche à nouveau la carte pour ouvrir sa page EDHREC ↗</div>
+</div>
+
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
