@@ -701,10 +701,16 @@
   // trouvée pendant l'analyse en masse (jetons, émblèmes, produits scellés
   // qui ne seront de toute façon jamais indexés) multiplierait les
   // requêtes réseau et ralentirait l'analyse de collections volumineuses.
-  // cacheMap (optionnel) : Map slug -> enregistrement, préchargée en une
-  // fois via idbGetAll() au lieu d'une transaction IndexedDB par carte.
+  // cacheMap (optionnel) : Map slug -> enregistrement, utilisée comme cache
+  // local à l'analyse en cours (évite de relire IndexedDB deux fois pour le
+  // même slug pendant un même run, ex. second passage). Chaque carte non
+  // encore vue ce run-ci passe par une vraie lecture IndexedDB asynchrone
+  // (idbGet), ce qui anime naturellement la barre de progression carte par
+  // carte — y compris quand tout vient du cache, juste beaucoup plus vite
+  // que lors d'un vrai appel réseau.
   async function fetchCardPage(slug, cardName, useScryfallFallback, cacheMap) {
-    const cached = cacheMap ? cacheMap.get(slug) : await idbGet(STORE_CARDS, slug);
+    const cached = cacheMap && cacheMap.has(slug) ? cacheMap.get(slug) : await idbGet(STORE_CARDS, slug);
+    if (cacheMap && cached) cacheMap.set(slug, cached);
     if (cached && Date.now() - cached.fetchedAt < CACHE_MAX_AGE_MS) {
       diagLog.count(cached.notFound ? "cache_hit_notfound" : "cache_hit_found");
       return { data: cached.data, fromCache: true, notFound: cached.notFound || false };
@@ -1465,20 +1471,11 @@
     const seenCommanders = new Set();
     const ownedCommanderSlugs = new Set();
 
-    // Un seul chargement de tout le cache en mémoire plutôt qu'une
-    // transaction IndexedDB par carte (jusqu'à plusieurs milliers sinon).
-    // Sur une grosse collection déjà bien cachée, cette lecture IndexedDB
-    // peut à elle seule prendre quelques secondes (structured clone de
-    // plusieurs Mo de JSON EDHREC) : on l'indique explicitement, sinon la
-    // barre de progression reste figée sans qu'on comprenne pourquoi.
-    progressStateKey = "progress.loadingCache";
-    els.progressLabel.textContent = t("progress.loadingCache");
-    els.progressFill.classList.add("indeterminate");
-    diagLog.startPhase("cachePreload");
-    const cardCache = new Map((await idbGetAll(STORE_CARDS)).map((r) => [r.slug, r]));
-    diagLog.endPhase("cachePreload");
-    els.progressFill.classList.remove("indeterminate");
-    els.progressFill.style.width = "0%";
+    // Cache local à l'analyse en cours (voir commentaire de fetchCardPage) :
+    // pas de préchargement en bloc — chaque carte, qu'elle vienne du cache
+    // ou du réseau, avance le compteur et la barre au même rythme, juste
+    // plus vite pour le cache.
+    const cardCache = new Map();
     circuitBreaker.reset();
 
     if (diagSampleInterval) clearInterval(diagSampleInterval);
