@@ -87,6 +87,7 @@
   let currentFileLabel = null; // { fileName, count, restored }
   let lastSessionInfo = null; // { fileName, count }
   let analysisTimerInterval = null;
+  let diagSampleInterval = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -115,6 +116,9 @@
     statCache: $("statCache"),
     statDuration: $("statDuration"),
     statNotFound: $("statNotFound"),
+    diagPanel: $("diagPanel"),
+    diagReportBtn: $("diagReportBtn"),
+    diagStatus: $("diagStatus"),
     notFoundPanel: $("notFoundPanel"),
     notFoundSummary: $("notFoundSummary"),
     notFoundList: $("notFoundList"),
@@ -366,6 +370,18 @@
     return m + "m " + (s < 10 ? "0" : "") + s + "s";
   }
 
+  function downloadTextFile(filename, text) {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   // Toute requête réseau passe par ici : évite qu'une requête bloquée
   // (Scryfall lent, Wi-Fi capricieux…) ne fasse tourner un spinner à
   // l'infini ou ne bloque un worker de l'analyse en masse.
@@ -379,6 +395,136 @@
       clearTimeout(timer);
     }
   }
+
+  // -----------------------------------------------------------------------
+  // Journal de diagnostic : trace où part le temps pendant une analyse
+  // (latence réseau réelle par requête, déclenchements du coupe-circuit,
+  // durée de chaque phase, timeline échantillonnée) sans quasiment aucun
+  // coût en performance. Exporté en texte via le bouton "Copier le rapport
+  // de diagnostic" une fois l'analyse terminée.
+  // -----------------------------------------------------------------------
+  const diagLog = (function () {
+    let startedAt = 0;
+    let events = [];
+    let phases = {};
+    let timeline = [];
+    let requestDurations = [];
+    let counts = {};
+    let meta = {};
+
+    function now() {
+      return performance.now();
+    }
+
+    function reset(metaInfo) {
+      startedAt = now();
+      events = [];
+      phases = {};
+      timeline = [];
+      requestDurations = [];
+      counts = {};
+      meta = metaInfo || {};
+    }
+
+    function count(kind) {
+      counts[kind] = (counts[kind] || 0) + 1;
+    }
+
+    function recordRequest(kind, ms, slug) {
+      count(kind);
+      requestDurations.push({ slug, ms: Math.round(ms), kind });
+    }
+
+    function event(type, data) {
+      events.push(Object.assign({ t: Math.round(now() - startedAt), type }, data || {}));
+    }
+
+    function startPhase(name) {
+      phases[name] = { start: Math.round(now() - startedAt), end: null };
+    }
+
+    function endPhase(name) {
+      if (phases[name]) phases[name].end = Math.round(now() - startedAt);
+    }
+
+    function sampleTimeline(extra) {
+      timeline.push(Object.assign({ t: Math.round(now() - startedAt) }, extra));
+    }
+
+    function percentile(sorted, p) {
+      if (!sorted.length) return 0;
+      return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
+    }
+
+    function exportText() {
+      const totalMs = Math.round(now() - startedAt);
+      const durations = requestDurations.map((r) => r.ms).sort((a, b) => a - b);
+      const slowest = requestDurations.slice().sort((a, b) => b.ms - a.ms).slice(0, 25);
+      const lines = [];
+
+      lines.push("=== Rapport de diagnostic MECA ===");
+      lines.push("Date : " + new Date().toISOString());
+      lines.push("Navigateur : " + navigator.userAgent);
+      if (navigator.connection) {
+        const c = navigator.connection;
+        lines.push(
+          "Connexion : " + (c.effectiveType || "?") + (c.downlink ? ", ~" + c.downlink + "Mbps" : "") + (c.rtt ? ", rtt~" + c.rtt + "ms" : "")
+        );
+      }
+      lines.push("Concurrence initiale : " + meta.fetchConcurrency + " | Second passage : " + meta.secondPassConcurrency);
+      lines.push("Cartes dans la collection : " + meta.itemCount);
+      lines.push("Durée totale : " + formatDuration(totalMs));
+      lines.push("");
+
+      lines.push("-- Phases --");
+      for (const name of Object.keys(phases)) {
+        const p = phases[name];
+        const d = p.end != null ? p.end - p.start : null;
+        lines.push(name + " : " + (d != null ? formatDuration(d) : "en cours") + "  (t+" + formatDuration(p.start) + " → " + (p.end != null ? "t+" + formatDuration(p.end) : "?") + ")");
+      }
+      lines.push("");
+
+      lines.push("-- Compteurs --");
+      for (const k of Object.keys(counts)) lines.push(k + " : " + counts[k]);
+      lines.push("");
+
+      if (durations.length) {
+        lines.push("-- Latence des requêtes réseau réelles (ms, hors cache) --");
+        lines.push(
+          "n=" + durations.length +
+            "  moy=" + Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) +
+            "  médiane=" + percentile(durations, 50) +
+            "  p90=" + percentile(durations, 90) +
+            "  p99=" + percentile(durations, 99) +
+            "  max=" + durations[durations.length - 1]
+        );
+        lines.push("");
+      }
+
+      lines.push("-- 25 requêtes les plus lentes --");
+      for (const r of slowest) lines.push(r.ms + "ms\t" + r.kind + "\t" + r.slug);
+      lines.push("");
+
+      const breakerEvents = events.filter((e) => e.type.indexOf("breaker") === 0);
+      lines.push("-- Événements du coupe-circuit (" + breakerEvents.length + ") --");
+      for (const e of breakerEvents) {
+        lines.push("t+" + formatDuration(e.t) + "  " + e.type + (e.ratio !== undefined ? "  ratio=" + e.ratio : ""));
+      }
+      lines.push("");
+
+      lines.push("-- Timeline (1 échantillon/s) --");
+      lines.push("t(s)\ttrouvées\tcache\tnonTrouv.\tbloquées\tralenti");
+      for (const s of timeline) {
+        lines.push(
+          (s.t / 1000).toFixed(1) + "\t" + s.found + "\t" + s.fromCache + "\t" + s.notFound + "\t" + s.blocked + "\t" + (s.throttled ? "OUI" : "-")
+        );
+      }
+
+      return lines.join("\n");
+    }
+
+    return { reset, count, recordRequest, event, startPhase, endPhase, sampleTimeline, exportText };
+  })();
 
   // -----------------------------------------------------------------------
   // Coupe-circuit anti-blocage (voir constantes BREAKER_*)
@@ -402,6 +548,7 @@
           if (recoveryStreak >= BREAKER_RECOVERY_STREAK) {
             throttled = false;
             recoveryStreak = 0;
+            diagLog.event("breaker_recover");
           }
         }
       },
@@ -418,6 +565,7 @@
           if (ratio >= BREAKER_BLOCK_RATIO) {
             throttled = true;
             cooldownUntil = Date.now() + BREAKER_COOLDOWN_MS;
+            diagLog.event("breaker_trip", { ratio: Math.round(ratio * 100) / 100 });
             ring = [];
           }
         }
@@ -479,10 +627,12 @@
     const url = EDHREC_BASE + "/pages/cards/" + encodeURIComponent(slug) + ".json";
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       let res;
+      const reqStart = performance.now();
       try {
         res = await fetchWithTimeout(url);
       } catch (err) {
         // Erreur réseau réelle (timeout, coupure...) : transitoire.
+        diagLog.recordRequest("network_error", performance.now() - reqStart, slug);
         circuitBreaker.recordBlocked();
         if (attempt < MAX_RETRIES) {
           await sleep(300 * (attempt + 1));
@@ -492,11 +642,13 @@
       }
 
       if (res.status === 404 || res.status === 403) {
+        diagLog.recordRequest("absent", performance.now() - reqStart, slug);
         circuitBreaker.recordSuccess(); // le serveur répond normalement, la carte n'existe juste pas
         return { data: null, notFound: true };
       }
 
       if (res.status === 429) {
+        diagLog.recordRequest("rate_limited_429", performance.now() - reqStart, slug);
         circuitBreaker.recordBlocked();
         if (attempt < MAX_RETRIES) {
           const retryAfter = parseFloat(res.headers.get("retry-after"));
@@ -508,6 +660,7 @@
 
       if (!res.ok) {
         // 5xx et autres : transitoire.
+        diagLog.recordRequest("http_" + res.status, performance.now() - reqStart, slug);
         circuitBreaker.recordBlocked();
         if (attempt < MAX_RETRIES) {
           await sleep(300 * (attempt + 1));
@@ -518,10 +671,12 @@
 
       try {
         const json = await res.json();
+        diagLog.recordRequest("found", performance.now() - reqStart, slug);
         circuitBreaker.recordSuccess();
         return { data: json, notFound: false };
       } catch (err) {
         // Réponse 200 mais corps illisible : transitoire, on retente.
+        diagLog.recordRequest("parse_error", performance.now() - reqStart, slug);
         circuitBreaker.recordBlocked();
         if (attempt < MAX_RETRIES) {
           await sleep(300 * (attempt + 1));
@@ -545,6 +700,7 @@
   async function fetchCardPage(slug, cardName, useScryfallFallback, cacheMap) {
     const cached = cacheMap ? cacheMap.get(slug) : await idbGet(STORE_CARDS, slug);
     if (cached && Date.now() - cached.fetchedAt < CACHE_MAX_AGE_MS) {
+      diagLog.count(cached.notFound ? "cache_hit_notfound" : "cache_hit_found");
       return { data: cached.data, fromCache: true, notFound: cached.notFound || false };
     }
 
@@ -641,6 +797,10 @@
     }
   }
 
+  function nextFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
   // breaker (optionnel) : un circuitBreaker (voir plus haut). Quand fourni,
   // le nombre de workers actifs simultanés peut être réduit dynamiquement
   // (breaker.getThrottleFactor()) et de nouveaux workers attendent la fin
@@ -651,6 +811,7 @@
     let idx = 0;
     let done = 0;
     let active = 0;
+    let sinceYield = 0;
     const results = new Array(items.length);
 
     return new Promise((resolve) => {
@@ -678,6 +839,15 @@
         done++;
         active--;
         if (onProgress) onProgress(done, items.length, items[my]);
+        // Quand (presque) tout vient du cache, chaque item se résout en une
+        // simple micro-tâche sans jamais toucher le réseau ni IndexedDB : sans
+        // ce point de passage, le navigateur n'a jamais l'occasion de repeindre
+        // la barre de progression avant la toute fin de l'analyse.
+        sinceYield++;
+        if (sinceYield >= 20) {
+          sinceYield = 0;
+          await nextFrame();
+        }
         maybeStart();
       }
 
@@ -1274,6 +1444,13 @@
     }, 200);
 
     const items = Array.from(collection.values());
+    diagLog.reset({
+      fetchConcurrency: FETCH_CONCURRENCY,
+      secondPassConcurrency: SECOND_PASS_CONCURRENCY,
+      itemCount: items.length,
+    });
+    els.diagPanel.style.display = "none";
+
     try {
     let fromCache = 0;
     let found = 0;
@@ -1284,8 +1461,21 @@
 
     // Un seul chargement de tout le cache en mémoire plutôt qu'une
     // transaction IndexedDB par carte (jusqu'à plusieurs milliers sinon).
+    diagLog.startPhase("cachePreload");
     const cardCache = new Map((await idbGetAll(STORE_CARDS)).map((r) => [r.slug, r]));
+    diagLog.endPhase("cachePreload");
     circuitBreaker.reset();
+
+    if (diagSampleInterval) clearInterval(diagSampleInterval);
+    diagSampleInterval = setInterval(() => {
+      diagLog.sampleTimeline({
+        found,
+        fromCache,
+        notFound: notFoundItems.length,
+        blocked: blockedItems.length,
+        throttled: circuitBreaker.isThrottled(),
+      });
+    }, 1000);
 
     progressStateKey = "progress.fetching"; els.progressLabel.textContent = t("progress.fetching");
 
@@ -1305,6 +1495,7 @@
       }
     }
 
+    diagLog.startPhase("mainPass");
     const results = await runPool(
       items,
       async (item) => {
@@ -1337,6 +1528,7 @@
       },
       circuitBreaker
     );
+    diagLog.endPhase("mainPass");
 
     flushCardWrites();
 
@@ -1350,6 +1542,7 @@
       logLine(t("log.retryingBlocked", { n: blockedItems.length }));
       circuitBreaker.reset();
 
+      diagLog.startPhase("secondPass");
       const resultIndexBySlug = new Map(results.map((r, i) => [r.slug, i]));
       await runPool(
         blockedItems,
@@ -1376,6 +1569,7 @@
         },
         circuitBreaker
       );
+      diagLog.endPhase("secondPass");
       flushCardWrites();
     }
 
@@ -1383,7 +1577,13 @@
     lastMinSample = minSample;
 
     progressStateKey = "progress.aggregating"; els.progressLabel.textContent = t("progress.aggregating");
+    diagLog.startPhase("aggregation");
     allCommanders = aggregate(results, minSample);
+    diagLog.endPhase("aggregation");
+
+    if (diagSampleInterval) { clearInterval(diagSampleInterval); diagSampleInterval = null; }
+    els.diagPanel.style.display = "flex";
+    els.diagStatus.textContent = "";
 
     els.statCommanders.textContent = allCommanders.length;
     els.statOwnedCommanders.textContent = ownedCommanderSlugs.size;
@@ -1417,6 +1617,7 @@
     warmUpImageCache(Array.from(namesToWarm));
     } finally {
       if (analysisTimerInterval) { clearInterval(analysisTimerInterval); analysisTimerInterval = null; }
+      if (diagSampleInterval) { clearInterval(diagSampleInterval); diagSampleInterval = null; }
     }
   }
 
@@ -1560,6 +1761,20 @@
   });
 
   els.startBtn.addEventListener("click", startAnalysis);
+
+  els.diagReportBtn.addEventListener("click", async () => {
+    const text = diagLog.exportText();
+    try {
+      await navigator.clipboard.writeText(text);
+      els.diagStatus.textContent = t("diag.copied");
+    } catch (err) {
+      // Presse-papier indisponible (permissions, contexte non sécurisé...) :
+      // on télécharge le rapport en .txt pour que la personne puisse quand
+      // même le récupérer.
+      downloadTextFile("meca-diagnostic.txt", text);
+      els.diagStatus.textContent = t("diag.downloaded");
+    }
+  });
   // Le re-rendu (mise à jour du DOM/layout) est différé au tick suivant :
   // sur certains navigateurs mobiles, mettre à jour la mise en page
   // pendant que le picker natif du <select> se referme peut le faire

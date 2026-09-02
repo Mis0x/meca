@@ -484,6 +484,28 @@
     display: none;
   }
   .stats-strip.show { display: grid; }
+  .diag-panel {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .diag-btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    padding: 7px 12px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .diag-btn:hover { border-color: var(--accent); color: var(--accent-light); }
+  .diag-status {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
   .stat-box {
     background: var(--panel);
     padding: 14px 16px;
