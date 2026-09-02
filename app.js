@@ -405,6 +405,7 @@
   // -----------------------------------------------------------------------
   const diagLog = (function () {
     let startedAt = 0;
+    let finishedAt = null;
     let events = [];
     let phases = {};
     let timeline = [];
@@ -418,12 +419,17 @@
 
     function reset(metaInfo) {
       startedAt = now();
+      finishedAt = null;
       events = [];
       phases = {};
       timeline = [];
       requestDurations = [];
       counts = {};
       meta = metaInfo || {};
+    }
+
+    function finish() {
+      finishedAt = Math.round(now() - startedAt);
     }
 
     function count(kind) {
@@ -457,7 +463,7 @@
     }
 
     function exportText() {
-      const totalMs = Math.round(now() - startedAt);
+      const totalMs = finishedAt != null ? finishedAt : Math.round(now() - startedAt);
       const durations = requestDurations.map((r) => r.ms).sort((a, b) => a - b);
       const slowest = requestDurations.slice().sort((a, b) => b.ms - a.ms).slice(0, 25);
       const lines = [];
@@ -523,7 +529,7 @@
       return lines.join("\n");
     }
 
-    return { reset, count, recordRequest, event, startPhase, endPhase, sampleTimeline, exportText };
+    return { reset, finish, count, recordRequest, event, startPhase, endPhase, sampleTimeline, exportText };
   })();
 
   // -----------------------------------------------------------------------
@@ -1461,9 +1467,18 @@
 
     // Un seul chargement de tout le cache en mémoire plutôt qu'une
     // transaction IndexedDB par carte (jusqu'à plusieurs milliers sinon).
+    // Sur une grosse collection déjà bien cachée, cette lecture IndexedDB
+    // peut à elle seule prendre quelques secondes (structured clone de
+    // plusieurs Mo de JSON EDHREC) : on l'indique explicitement, sinon la
+    // barre de progression reste figée sans qu'on comprenne pourquoi.
+    progressStateKey = "progress.loadingCache";
+    els.progressLabel.textContent = t("progress.loadingCache");
+    els.progressFill.classList.add("indeterminate");
     diagLog.startPhase("cachePreload");
     const cardCache = new Map((await idbGetAll(STORE_CARDS)).map((r) => [r.slug, r]));
     diagLog.endPhase("cachePreload");
+    els.progressFill.classList.remove("indeterminate");
+    els.progressFill.style.width = "0%";
     circuitBreaker.reset();
 
     if (diagSampleInterval) clearInterval(diagSampleInterval);
@@ -1580,6 +1595,7 @@
     diagLog.startPhase("aggregation");
     allCommanders = aggregate(results, minSample);
     diagLog.endPhase("aggregation");
+    diagLog.finish();
 
     if (diagSampleInterval) { clearInterval(diagSampleInterval); diagSampleInterval = null; }
     els.diagPanel.style.display = "flex";
